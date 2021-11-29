@@ -1,0 +1,10 @@
+[package]
+name = "bofh-cli"
+version = "0.0.0"
+edition = "2021"
+description = "Command-line client for the Cerebrum IGA"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
