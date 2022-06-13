@@ -1,10 +1,16 @@
 [package]
-name = "bofh-cli"
-version = "0.0.0"
+name = "bofh"
+version = "0.0.1"
 edition = "2021"
 description = "Command-line client for the Cerebrum IGA"
 license = "MIT"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+repository = "https://github.com/tobiasvl/bofh-rs"
+categories = ["api-bindings", "command-line-utilities"]
 
 [dependencies]
+xmlrpc = "0.15"
+thiserror = "1.0"
+rustyline = "9.1"
+clap = { version = "3.1", features = ["derive"] }
+whoami = "1.2"
+rpassword = "6.0"
