@@ -96,8 +96,25 @@ impl Bofh {
         }
     }
 
-    pub fn run_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
-        self.run_raw_sess_command(command, args)
+    // XXX: There are only a handful of bofhd commands:
+    // motd = get_motd(client_name, version)
+    // session = login(user, pass)
+    // logout(session)
+    // get_commands(session) -- see _init_commands
+    // help(session) -- general help
+    // help(session, "arg_help", ref) -- help on arg type,
+    //                                   ref found in arg['help_ref']
+    // help(session, group) -- help on group
+    // help(session, group, cmd) -- help on command
+    // run_command(session, command, args)  # command = group_cmd
+    // call_prompt_func(session, command, args) =>
+    //   {prompt: string, help_ref: key, last_arg: bool, default: value,
+    //    map: [[["Header", None], value], [[format, *args], value], ...],
+    //    raw: bool}
+    // get_default_param(session, command, args)
+    // get_format_suggestion(command)
+    pub fn run_command(&self, args: &[&str]) -> Result<Value, BofhError> {
+        self.run_raw_sess_command("run_command", args)
     }
 
     pub fn login(
