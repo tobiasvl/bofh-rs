@@ -38,7 +38,7 @@ impl Bofh {
         Ok(bofh)
     }
 
-    fn run_request(&mut self, request: Request) -> Result<Value, BofhError> {
+    fn run_request(&self, request: Request) -> Result<Value, BofhError> {
         match request.call_url(&self.url) {
             Ok(result) => Ok(result),
             Err(err) => {
@@ -75,19 +75,19 @@ impl Bofh {
         }
     }
 
-    fn run_raw_command(&mut self, command: &str, args: Vec<&str>) -> Result<Value, BofhError> {
+    fn run_raw_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         let mut request = Request::new(command);
         for arg in args {
-            request = request.arg(arg);
+            request = request.arg(*arg);
         }
         self.run_request(request)
     }
 
-    fn run_raw_sess_command(&mut self, command: &str, args: Vec<&str>) -> Result<Value, BofhError> {
+    fn run_raw_sess_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         if let Some(session) = &self.session {
             let mut request = Request::new(command).arg(session.to_owned());
             for arg in args {
-                request = request.arg(arg);
+                request = request.arg(*arg);
             }
             self.run_request(request)
         } else {
@@ -96,7 +96,7 @@ impl Bofh {
         }
     }
 
-    pub fn run_command(&mut self, command: &str, args: Vec<&str>) -> Result<Value, BofhError> {
+    pub fn run_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         self.run_raw_sess_command(command, args)
     }
 
@@ -107,7 +107,7 @@ impl Bofh {
         _init: bool,
     ) -> Result<(), BofhError> {
         self.session = Some(
-            self.run_raw_command("login", vec![username, &password])?
+            self.run_raw_command("login", &[username, &password])?
                 .as_str()
                 .unwrap()
                 .to_string(),
@@ -115,9 +115,9 @@ impl Bofh {
         Ok(())
     }
 
-    pub fn get_motd(&mut self) -> Result<String, BofhError> {
+    pub fn get_motd(&self) -> Result<String, BofhError> {
         Ok(self
-            .run_raw_command("get_motd", vec![])?
+            .run_raw_command("get_motd", &[])?
             .as_str()
             .unwrap()
             .to_string())
@@ -127,7 +127,7 @@ impl Bofh {
 impl Drop for Bofh {
     fn drop(&mut self) {
         if self.session.is_some() {
-            let _ = self.run_raw_sess_command("logout", vec![]);
+            let _ = self.run_raw_sess_command("logout", &[]);
         }
         self.session = None;
         // TODO bring down all commands
