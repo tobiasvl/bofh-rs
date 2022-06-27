@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use thiserror::Error;
 use xmlrpc::{Request, Value};
 
@@ -13,26 +14,56 @@ pub enum BofhError {
     ServerRestartedError,
     #[error("Session expired")]
     SessionExpiredError,
-    #[error("Unknown command")]
-    NotImplementedError,
+    #[error("{0}")]
+    NotImplementedError(String),
     #[error("{0}")]
     Fault(String),
+}
+
+#[derive(Debug)]
+struct Command {
+    fullname: String,
+    args: Vec<Argument>,
+    format_suggestion: Option<String>,
+    help: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct Argument {
+    optional: bool,
+    repeat: bool,
+    default: Option<String>,
+    arg_type: Option<String>,
+    help_ref: Option<String>,
+    prompt: Option<String>,
+}
+
+#[derive(Debug)]
+enum ArgType {}
+
+#[derive(Debug)]
+struct CommandGroup {
+    name: String,
+    commands: BTreeMap<String, Command>,
 }
 
 pub struct Bofh {
     /// The URL to the bofhd server
     pub url: String,
-    session: Option<String>,
     /// The Message Of The Day provided by the bofhd server after connection
     pub motd: Option<String>,
+    session: Option<String>,
+    commands: Option<BTreeMap<String, CommandGroup>>,
 }
 
 impl Bofh {
+    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day
     pub fn new(url: String) -> Result<Self, BofhError> {
         let mut bofh = Self {
             url,
             session: None,
             motd: None,
+            commands: None,
         };
         bofh.motd = Some(bofh.get_motd()?);
         Ok(bofh)
@@ -59,12 +90,12 @@ impl Bofh {
                         } else {
                             unimplemented!()
                         }
-                    } else if fault
-                        .fault_string
-                        .strip_prefix("NotImplementedError:")
-                        .is_some()
+                    } else if let Some(not_implemented_error) =
+                        fault.fault_string.strip_prefix("NotImplementedError:")
                     {
-                        Err(BofhError::NotImplementedError)
+                        Err(BofhError::NotImplementedError(
+                            not_implemented_error.to_string(),
+                        ))
                     } else {
                         Err(BofhError::Fault(fault.fault_string.to_owned()))
                     }
@@ -113,31 +144,109 @@ impl Bofh {
     //    raw: bool}
     // get_default_param(session, command, args)
     // get_format_suggestion(command)
+
+    fn init_commands(&mut self) -> Result<(), BofhError> {
+        let response = self.run_raw_sess_command("get_commands", &[])?;
+        let mut commands = BTreeMap::<String, CommandGroup>::new();
+        for (cmd, array) in response.as_struct().unwrap() {
+            let cmd_group = array[0].as_array().unwrap()[0].as_str().unwrap();
+            if !commands.contains_key(cmd_group) {
+                commands.insert(
+                    cmd_group.into(),
+                    CommandGroup {
+                        name: cmd_group.into(),
+                        commands: BTreeMap::new(),
+                    },
+                );
+            }
+            commands.get_mut(cmd_group).unwrap().commands.insert(
+                array[0].as_array().unwrap()[1].as_str().unwrap().into(),
+                Command {
+                    fullname: cmd.into(),
+                    args: match &array[1] {
+                        Value::Array(array) => {
+                            let mut vector = vec![];
+                            for strct in array {
+                                let strct = strct.as_struct().unwrap();
+                                vector.push(Argument {
+                                    optional: match strct
+                                        .get("optional")
+                                        .or(Some(&Value::Bool(false)))
+                                    {
+                                        Some(Value::Bool(value)) => value.to_owned(),
+                                        Some(Value::String(value)) => {
+                                            matches!(value.as_str(), "True")
+                                        }
+                                        _ => false,
+                                    },
+                                    repeat: match strct.get("repeat").or(Some(&Value::Bool(false)))
+                                    {
+                                        Some(Value::Bool(value)) => value.to_owned(),
+                                        Some(Value::String(value)) => {
+                                            matches!(value.as_str(), "True")
+                                        }
+                                        _ => false,
+                                    },
+                                    default: strct
+                                        .get("default")
+                                        .map(|x| x.as_str().unwrap().to_string()),
+                                    arg_type: strct
+                                        .get("type")
+                                        .map(|x| x.as_str().unwrap().to_string()),
+                                    help_ref: strct
+                                        .get("help_ref")
+                                        .map(|x| x.as_str().unwrap().to_string()),
+                                    prompt: strct
+                                        .get("prompt")
+                                        .map(|x| x.as_str().unwrap().to_string()),
+                                });
+                            }
+                            vector
+                        }
+                        Value::String(_) => vec![Argument::default()], // prompt_func
+                        _ => vec![],
+                    },
+                    format_suggestion: None,
+                    help: None,
+                },
+            );
+        }
+        self.commands = Some(commands);
+        Ok(())
+    }
+
+    /// Run a command
     pub fn run_command(&self, args: &[&str]) -> Result<Value, BofhError> {
         self.run_raw_sess_command("run_command", args)
     }
 
-    pub fn login(
-        &mut self,
-        username: &str,
-        password: String,
-        _init: bool,
-    ) -> Result<(), BofhError> {
+    /// Authenticate with the bofhd server. Sets up a session, and optionally populates `self` with the commands that the bofhd server reports as supported.
+    pub fn login(&mut self, username: &str, password: String, init: bool) -> Result<(), BofhError> {
         self.session = Some(
             self.run_raw_command("login", &[username, &password])?
                 .as_str()
                 .unwrap()
                 .to_string(),
         );
+        if init {
+            self.init_commands()?;
+        }
         Ok(())
     }
 
+    /// Get the current Message of the Day from the bofhd server
     pub fn get_motd(&self) -> Result<String, BofhError> {
         Ok(self
             .run_raw_command("get_motd", &[])?
             .as_str()
             .unwrap()
             .to_string())
+    }
+
+    /// Gets the commands that the bofhd server reports that it supports.
+    /// Note that the server might have hidden commands.
+    pub fn get_commands(&self) -> Result<Value, BofhError> {
+        self.run_raw_sess_command("get_commands", &[])
     }
 }
 
@@ -146,8 +255,6 @@ impl Drop for Bofh {
         if self.session.is_some() {
             let _ = self.run_raw_sess_command("logout", &[]);
         }
-        self.session = None;
-        // TODO bring down all commands
     }
 }
 
