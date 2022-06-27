@@ -104,8 +104,13 @@ fn main() {
         match rl.readline(&args.prompt) {
             Ok(line) => {
                 let command: Vec<&str> = line.split_whitespace().collect();
-                println!("{:?}", bofh.run_command(&command));
-                rl.add_history_entry(&line);
+                if !command.is_empty() {
+                    match bofh.run_command(&command) {
+                        Ok(ok) => println!("{:?}", ok),
+                        Err(err) => println!("{}", err),
+                    }
+                    rl.add_history_entry(&line);
+                }
             }
             Err(ReadlineError::Interrupted) => {
                 break;

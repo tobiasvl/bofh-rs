@@ -8,3 +8,4 @@ See also
 
 * [jbofh](https://github.com/unioslo/jbofh) (Java)
 * [pybofh](https://github.com/unioslo/pybofh) (Python)
+* wofh/[Brukerinfo](https://github.com/unioslo/brukerinfo) (PHP)

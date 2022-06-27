@@ -16,6 +16,10 @@ pub enum BofhError {
     SessionExpiredError,
     #[error("{0}")]
     NotImplementedError(String),
+    #[error("Incomplete command, possible subcommands: [{0}]")]
+    IncompleteCommandError(String),
+    #[error("Unknown command")]
+    UnknownCommandError,
     #[error("{0}")]
     Fault(String),
 }
@@ -217,7 +221,34 @@ impl Bofh {
 
     /// Run a command
     pub fn run_command(&self, args: &[&str]) -> Result<Value, BofhError> {
-        self.run_raw_sess_command("run_command", args)
+        let mut request = Request::new("run_command").arg(self.session.to_owned());
+        if let Some(commands) = &self.commands {
+            if let Some(command_group) = commands.get(args[0]) {
+                if args.len() == 1 {
+                    return Err(BofhError::IncompleteCommandError(
+                        command_group
+                            .commands
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                    ));
+                }
+                if let Some(subcommand) = command_group.commands.get(args[1]) {
+                    request = request.arg(subcommand.fullname.as_str());
+                } else {
+                    return Err(BofhError::UnknownCommandError);
+                }
+                for arg in &args[2..] {
+                    request = request.arg(*arg);
+                }
+            } else {
+                return Err(BofhError::UnknownCommandError);
+            }
+            self.run_request(request)
+        } else {
+            Err(BofhError::NoSessionError)
+        }
     }
 
     /// Authenticate with the bofhd server. Sets up a session, and optionally populates `self` with the commands that the bofhd server reports as supported.
