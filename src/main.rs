@@ -1,5 +1,7 @@
 use bofh::Bofh;
 use clap::Parser;
+mod helper;
+use crate::helper::BofhHelper;
 use rpassword::prompt_password;
 use rustyline::{config::Configurer, error::ReadlineError, Editor};
 
@@ -89,7 +91,13 @@ fn main() {
         std::process::exit(1);
     };
 
-    let mut rl = Editor::<()>::new();
+    let commands = bofh.commands.clone();
+    let helper = BofhHelper {
+        commands: commands.unwrap(),
+    };
+
+    let mut rl = Editor::<BofhHelper>::new();
+    rl.set_helper(Some(helper));
 
     if args.vi {
         rl.set_edit_mode(rustyline::EditMode::Vi);
@@ -112,10 +120,7 @@ fn main() {
                     rl.add_history_entry(&line);
                 }
             }
-            Err(ReadlineError::Interrupted) => {
-                break;
-            }
-            Err(ReadlineError::Eof) => {
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
                 break;
             }
             Err(err) => {

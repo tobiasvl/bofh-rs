@@ -24,44 +24,50 @@ pub enum BofhError {
     Fault(String),
 }
 
-#[derive(Debug)]
-struct Command {
-    fullname: String,
-    args: Vec<Argument>,
-    format_suggestion: Option<String>,
-    help: Option<String>,
+#[derive(Debug, Clone)]
+pub struct Command {
+    pub fullname: String,
+    pub args: Vec<Argument>,
+    pub format_suggestion: Option<String>,
+    pub help: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct Argument {
-    optional: bool,
-    repeat: bool,
-    default: Option<String>,
-    arg_type: Option<String>,
-    help_ref: Option<String>,
-    prompt: Option<String>,
+#[derive(Debug, Default, Clone)]
+pub struct Argument {
+    pub optional: bool,
+    pub repeat: bool,
+    pub default: Option<String>,
+    pub arg_type: Option<String>,
+    pub help_ref: Option<String>,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug)]
 enum ArgType {}
 
-#[derive(Debug)]
-struct CommandGroup {
-    name: String,
-    commands: BTreeMap<String, Command>,
+#[derive(Debug, Clone)]
+pub struct CommandGroup {
+    pub name: String,
+    pub commands: BTreeMap<String, Command>,
 }
 
+/// The bofh client communicating with the bofhd server
 pub struct Bofh {
     /// The URL to the bofhd server
     pub url: String,
     /// The Message Of The Day provided by the bofhd server after connection
     pub motd: Option<String>,
+    /// Commands supported by the bofhd server
+    pub commands: Option<BTreeMap<String, CommandGroup>>,
     session: Option<String>,
-    commands: Option<BTreeMap<String, CommandGroup>>,
 }
 
 impl Bofh {
-    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day
+    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day.
+    ///
+    /// # Errors
+    ///
+    /// Will return a [`BofhError`] if the connection to the bofhd server fails, or it doesn't respond to the [`Self::get_motd`] command.
     pub fn new(url: String) -> Result<Self, BofhError> {
         let mut bofh = Self {
             url,
@@ -101,7 +107,7 @@ impl Bofh {
                             not_implemented_error.to_string(),
                         ))
                     } else {
-                        Err(BofhError::Fault(fault.fault_string.to_owned()))
+                        Err(BofhError::Fault(fault.fault_string.clone()))
                     }
                 } else {
                     Err(BofhError::XmlRpcError(err))
@@ -120,7 +126,7 @@ impl Bofh {
 
     fn run_raw_sess_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         if let Some(session) = &self.session {
-            let mut request = Request::new(command).arg(session.to_owned());
+            let mut request = Request::new(command).arg(session.clone());
             for arg in args {
                 request = request.arg(*arg);
             }
@@ -219,9 +225,17 @@ impl Bofh {
         Ok(())
     }
 
-    /// Run a command
+    /// Run a bofh command on the bofhd server.
+    ///
+    /// Note that this function actually runs the bofhd command `run_command bofh_command`, and can't be used to run raw bofhd commands. Those are all exposed through separate functions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
+    ///
+    /// If the bofhd session has expired and this function returns a [`BofhError::SessionExpiredError`], the client might want to reauthenticate using [`Self::login`] and then retry the command.
     pub fn run_command(&self, args: &[&str]) -> Result<Value, BofhError> {
-        let mut request = Request::new("run_command").arg(self.session.to_owned());
+        let mut request = Request::new("run_command").arg(self.session.clone());
         if let Some(commands) = &self.commands {
             if let Some(command_group) = commands.get(args[0]) {
                 if args.len() == 1 {
@@ -252,11 +266,23 @@ impl Bofh {
     }
 
     /// Authenticate with the bofhd server. Sets up a session, and optionally populates `self` with the commands that the bofhd server reports as supported.
+    ///
+    /// Note that this consumes `password` to discourage user-facing clients to hold onto the user's password.
+    /// If the user needs to reauthenticate (if [`Self::run_command`] later returns a [`BofhError::SessionExpiredError`], for example), please prompt the user for the password again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if logging in or getting the commands from the server fail for some reason.
+    ///
+    /// # Panics
+    ///
+    /// Will normally never panic, unless the session identifier returned by the bofhd server is in an invalid format.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn login(&mut self, username: &str, password: String, init: bool) -> Result<(), BofhError> {
         self.session = Some(
             self.run_raw_command("login", &[username, &password])?
                 .as_str()
-                .unwrap()
+                .expect("Invalid bofhd session identifier")
                 .to_string(),
         );
         if init {
@@ -266,22 +292,35 @@ impl Bofh {
     }
 
     /// Get the current Message of the Day from the bofhd server
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
+    ///
+    /// # Panics
+    ///
+    /// Will normally never panic, unless the Message of the Day returned by the bofhd server is in an invalid format.
     pub fn get_motd(&self) -> Result<String, BofhError> {
         Ok(self
             .run_raw_command("get_motd", &[])?
             .as_str()
-            .unwrap()
+            .expect("Invalid bofhd response")
             .to_string())
     }
 
     /// Gets the commands that the bofhd server reports that it supports.
     /// Note that the server might have hidden commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
     pub fn get_commands(&self) -> Result<Value, BofhError> {
         self.run_raw_sess_command("get_commands", &[])
     }
 }
 
 impl Drop for Bofh {
+    #[allow(clippy::let_underscore_drop)]
     fn drop(&mut self) {
         if self.session.is_some() {
             let _ = self.run_raw_sess_command("logout", &[]);
