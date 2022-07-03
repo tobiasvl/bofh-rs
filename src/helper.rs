@@ -38,12 +38,33 @@ impl Hinter for BofhHelper {
             return None;
         }
 
-        let words: Vec<&str> = line.splitn(3, ' ').collect();
+        let words: Vec<&str> = line.split_whitespace().collect();
 
         // Hint arguments
-        if words.len() > 2 {
-            // TODO hint arguments
-        }
+        if words.len() >= 2 {
+            if let Some(command) = self.commands.get(words[0]) {
+                if let Some(subcommand) = command.commands.get(words[1]) {
+                    let args_to_hint = subcommand.args.len() - words.len() + 2;
+                    if args_to_hint <= subcommand.args.len() {
+                        return Some(CommandHint {
+                            display: format!(
+                                "{}{}",
+                                if line.ends_with(char::is_whitespace) {
+                                    ""
+                                } else {
+                                    " "
+                                },
+                                subcommand.args[subcommand.args.len() - args_to_hint..]
+                                    .iter()
+                                    .filter_map(|arg| arg.arg_type.clone())
+                                    .collect::<Vec<String>>()
+                                    .join(" ")
+                            ),
+                        });
+                    }
+                }
+            }
+        };
 
         // Hint commands
         let mut pos = pos;
@@ -52,7 +73,7 @@ impl Hinter for BofhHelper {
             self.commands
                 .keys()
                 .filter_map(|command| {
-                    if command.starts_with(words[0]) {
+                    if command.starts_with(words[0]) && command != words[0] {
                         Some(command.as_str())
                     } else {
                         None
@@ -67,7 +88,7 @@ impl Hinter for BofhHelper {
                     .commands
                     .keys()
                     .filter_map(|command| {
-                        if command.starts_with(words[1]) {
+                        if command.starts_with(words[1]) && command != words[1] {
                             Some(command.as_str())
                         } else {
                             None
@@ -81,15 +102,14 @@ impl Hinter for BofhHelper {
             return None;
         };
 
-        if candidates.len() != 1 {
-            return None;
+        if candidates.len() == 1 {
+            return Some(
+                CommandHint {
+                    display: String::from(candidates[0]),
+                }
+                .suffix(pos),
+            );
         }
-
-        Some(
-            CommandHint {
-                display: String::from(candidates[0]),
-            }
-            .suffix(pos),
-        )
+        None
     }
 }

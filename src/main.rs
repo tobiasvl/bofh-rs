@@ -91,9 +91,8 @@ fn main() {
         std::process::exit(1);
     };
 
-    let commands = bofh.commands.clone();
     let helper = BofhHelper {
-        commands: commands.unwrap(),
+        commands: bofh.commands.clone().unwrap(),
     };
 
     let mut rl = Editor::<BofhHelper>::new();
