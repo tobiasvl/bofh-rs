@@ -3,8 +3,8 @@ use rustyline::Context;
 use rustyline_derive::{Completer, Helper, Highlighter, Validator};
 use std::collections::BTreeMap;
 #[derive(Completer, Helper, Validator, Highlighter)]
-pub(crate) struct BofhHelper {
-    pub(crate) commands: BTreeMap<String, bofh::CommandGroup>,
+pub(crate) struct BofhHelper<'a> {
+    pub(crate) commands: &'a BTreeMap<String, bofh::CommandGroup>,
 }
 
 #[derive(Hash, Debug, PartialEq, Eq)]
@@ -30,7 +30,7 @@ impl CommandHint {
     }
 }
 
-impl Hinter for BofhHelper {
+impl Hinter for BofhHelper<'_> {
     type Hint = CommandHint;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<CommandHint> {

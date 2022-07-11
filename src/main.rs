@@ -86,13 +86,16 @@ fn main() {
         Err(_) => std::process::exit(0), // FIXME errors on windows?
     };
 
-    if let Err(err) = bofh.login(&args.user, password, true) {
-        println!("{}", err);
-        std::process::exit(1);
+    let commands = match bofh.login(&args.user, password) {
+        Ok(commands) => commands,
+        Err(err) => {
+            println!("{}", err);
+            std::process::exit(1);
+        }
     };
 
     let helper = BofhHelper {
-        commands: bofh.commands.clone().unwrap(),
+        commands: &commands,
     };
 
     let mut rl = Editor::<BofhHelper>::new();
@@ -112,12 +115,31 @@ fn main() {
             Ok(line) => {
                 let command: Vec<&str> = line.split_whitespace().collect();
                 if !command.is_empty() {
-                    match bofh.run_command(&command) {
-                        Ok(ok) => println!("{:?}", ok),
-                        Err(err) => println!("{}", err),
+                    if let Some(command_group) = commands.get(command[0]) {
+                        if command.len() > 1 {
+                            if let Some(subcommand) = command_group.commands.get(command[1]) {
+                                match bofh.run_command(subcommand.fullname.as_str(), &command[2..])
+                                {
+                                    Ok(ok) => println!("{:?}", ok),
+                                    Err(err) => println!("{}", err),
+                                }
+                            } else {
+                                println!("Unknown command");
+                            }
+                        } else {
+                            println!(
+                                "Incomplete command, possible subcommands:\n{}",
+                                command_group
+                                    .commands
+                                    .keys()
+                                    .cloned()
+                                    .collect::<Vec<String>>()
+                                    .join(", "),
+                            );
+                        }
                     }
-                    rl.add_history_entry(&line);
                 }
+                rl.add_history_entry(&line);
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
                 break;

@@ -16,10 +16,6 @@ pub enum BofhError {
     SessionExpiredError,
     #[error("{0}")]
     NotImplementedError(String),
-    #[error("Incomplete command, possible subcommands: [{0}]")]
-    IncompleteCommandError(String),
-    #[error("Unknown command")]
-    UnknownCommandError,
     #[error("{0}")]
     Fault(String),
 }
@@ -57,8 +53,6 @@ pub struct Bofh {
     pub url: String,
     /// The Message Of The Day provided by the bofhd server after connection
     pub motd: Option<String>,
-    /// Commands supported by the bofhd server
-    pub commands: Option<BTreeMap<String, CommandGroup>>,
     session: Option<String>,
 }
 
@@ -73,7 +67,6 @@ impl Bofh {
             url,
             session: None,
             motd: None,
-            commands: None,
         };
         bofh.motd = Some(bofh.get_motd()?);
         Ok(bofh)
@@ -155,7 +148,7 @@ impl Bofh {
     // get_default_param(session, command, args)
     // get_format_suggestion(command)
 
-    fn init_commands(&mut self) -> Result<(), BofhError> {
+    fn get_commands(&mut self) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
         let response = self.run_raw_sess_command("get_commands", &[])?;
         let mut commands = BTreeMap::<String, CommandGroup>::new();
         for (cmd, array) in response.as_struct().unwrap() {
@@ -221,8 +214,7 @@ impl Bofh {
                 },
             );
         }
-        self.commands = Some(commands);
-        Ok(())
+        Ok(commands)
     }
 
     /// Run a bofh command on the bofhd server.
@@ -234,35 +226,16 @@ impl Bofh {
     /// Returns a [`BofhError`] if the command fails for some reason.
     ///
     /// If the bofhd session has expired and this function returns a [`BofhError::SessionExpiredError`], the client might want to reauthenticate using [`Self::login`] and then retry the command.
-    pub fn run_command(&self, args: &[&str]) -> Result<Value, BofhError> {
-        let mut request = Request::new("run_command").arg(self.session.clone());
-        if let Some(commands) = &self.commands {
-            if let Some(command_group) = commands.get(args[0]) {
-                if args.len() == 1 {
-                    return Err(BofhError::IncompleteCommandError(
-                        command_group
-                            .commands
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<String>>()
-                            .join(", "),
-                    ));
-                }
-                if let Some(subcommand) = command_group.commands.get(args[1]) {
-                    request = request.arg(subcommand.fullname.as_str());
-                } else {
-                    return Err(BofhError::UnknownCommandError);
-                }
-                for arg in &args[2..] {
-                    request = request.arg(*arg);
-                }
-            } else {
-                return Err(BofhError::UnknownCommandError);
+    pub fn run_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
+        // TODO: Return a formatted value?
+        let args: Vec<&str> = {
+            let mut command_args = vec![command];
+            for &arg in args {
+                command_args.push(arg);
             }
-            self.run_request(request)
-        } else {
-            Err(BofhError::NoSessionError)
-        }
+            command_args
+        };
+        self.run_raw_sess_command("run_command", &args)
     }
 
     /// Authenticate with the bofhd server. Sets up a session, and optionally populates `self` with the commands that the bofhd server reports as supported.
@@ -278,17 +251,18 @@ impl Bofh {
     ///
     /// Will normally never panic, unless the session identifier returned by the bofhd server is in an invalid format.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn login(&mut self, username: &str, password: String, init: bool) -> Result<(), BofhError> {
+    pub fn login(
+        &mut self,
+        username: &str,
+        password: String,
+    ) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
         self.session = Some(
             self.run_raw_command("login", &[username, &password])?
                 .as_str()
                 .expect("Invalid bofhd session identifier")
                 .to_string(),
         );
-        if init {
-            self.init_commands()?;
-        }
-        Ok(())
+        self.get_commands()
     }
 
     /// Get the current Message of the Day from the bofhd server
@@ -307,16 +281,6 @@ impl Bofh {
             .expect("Invalid bofhd response")
             .to_string())
     }
-
-    /// Gets the commands that the bofhd server reports that it supports.
-    /// Note that the server might have hidden commands.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`BofhError`] if the command fails for some reason.
-    pub fn get_commands(&self) -> Result<Value, BofhError> {
-        self.run_raw_sess_command("get_commands", &[])
-    }
 }
 
 impl Drop for Bofh {
@@ -333,6 +297,6 @@ mod tests {
     use crate::Bofh;
     #[test]
     fn connect() {
-        let _ = Bofh::new(String::from("https://cerebrum-uio-test.uio.no:8000"));
+        let _bofh = Bofh::new(String::from("https://cerebrum-uio-test.uio.no:8000"));
     }
 }
