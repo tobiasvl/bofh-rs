@@ -2,48 +2,71 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use xmlrpc::{Request, Value};
 
+/// Errors that might occur when communicating with a bofhd server.
 #[derive(Error, Debug)]
 pub enum BofhError {
+    /// Error occurring in the XML-RPC protocol
     #[error("{0}")]
     XmlRpcError(#[from] xmlrpc::Error),
-    #[error("Attempted to run session command before session was established")]
+    /// Attempted to run authenticated command before session was established
+    #[error("Attempted to run authenticated command before session was established")]
     NoSessionError,
+    /// Error in a Cerebrum/bofhd command
     #[error("{0}")]
     CerebrumError(String),
+    /// Server restarted in the middle of the session
     #[error("Server restarted")]
     ServerRestartedError,
+    /// Session has expired, and the client must re-authenticate
     #[error("Session expired")]
     SessionExpiredError,
+    /// The bofhd server reported that a command was not implemented
     #[error("{0}")]
     NotImplementedError(String),
+    /// XML-RPC request reported a fault
     #[error("{0}")]
     Fault(String),
 }
 
+/// A bofhd command
 #[derive(Debug, Clone)]
 pub struct Command {
+    /// The actual, full bofhd command name, which can be supplied to [`Bofh::run_command`]
     pub fullname: String,
+    /// Valid arguments to this command
     pub args: Vec<Argument>,
+    /// Output format suggestion for clients
     pub format_suggestion: Option<String>,
+    /// Help text for command, supplied by the server
     pub help: Option<String>,
 }
 
+/// An argument for a bofhd command
 #[derive(Debug, Default, Clone)]
 pub struct Argument {
+    /// Whether this argument is optional or required
     pub optional: bool,
+    /// Whether this argument can be repeated
     pub repeat: bool,
+    /// The default value for this argument
     pub default: Option<String>,
+    /// The argument type
     pub arg_type: Option<String>,
+    /// The help reference that should be used for this argument, if the client requests help
     pub help_ref: Option<String>,
+    /// The prompt that should be used for this argument, if it's not supplied
     pub prompt: Option<String>,
 }
 
 #[derive(Debug)]
 enum ArgType {}
 
+/// A bofhd command group, ie. semantically linked command prefixes
 #[derive(Debug, Clone)]
 pub struct CommandGroup {
+    /// The common prefix of the grouped commands
     pub name: String,
+    /// The command group's subcommands
     pub commands: BTreeMap<String, Command>,
 }
 
@@ -57,7 +80,7 @@ pub struct Bofh {
 }
 
 impl Bofh {
-    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day.
+    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day (which is stored in [`self.motd`]).
     ///
     /// # Errors
     ///
@@ -238,9 +261,9 @@ impl Bofh {
         self.run_raw_sess_command("run_command", &args)
     }
 
-    /// Authenticate with the bofhd server. Sets up a session, and optionally populates `self` with the commands that the bofhd server reports as supported.
+    /// Authenticate with the bofhd server and set up a session. Returns the commands available to the authenticated user.
     ///
-    /// Note that this consumes `password` to discourage user-facing clients to hold onto the user's password.
+    /// Note that this consumes `password` to discourage user-facing clients from holding onto the user's password.
     /// If the user needs to reauthenticate (if [`Self::run_command`] later returns a [`BofhError::SessionExpiredError`], for example), please prompt the user for the password again.
     ///
     /// # Errors
@@ -285,6 +308,7 @@ impl Bofh {
 
 impl Drop for Bofh {
     #[allow(clippy::let_underscore_drop)]
+    /// Logs the user out of the bofhd session.
     fn drop(&mut self) {
         if self.session.is_some() {
             let _ = self.run_raw_sess_command("logout", &[]);

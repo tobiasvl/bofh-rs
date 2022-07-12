@@ -72,7 +72,7 @@ fn main() {
     let mut bofh = match Bofh::new(args.url) {
         Ok(bofh) => bofh,
         Err(err) => {
-            println!("{}", err);
+            eprintln!("{}", err);
             std::process::exit(1);
         }
     };
@@ -89,7 +89,7 @@ fn main() {
     let commands = match bofh.login(&args.user, password) {
         Ok(commands) => commands,
         Err(err) => {
-            println!("{}", err);
+            eprintln!("{}", err);
             std::process::exit(1);
         }
     };
@@ -121,13 +121,13 @@ fn main() {
                                 match bofh.run_command(subcommand.fullname.as_str(), &command[2..])
                                 {
                                     Ok(ok) => println!("{:?}", ok),
-                                    Err(err) => println!("{}", err),
+                                    Err(err) => eprintln!("{}", err),
                                 }
                             } else {
-                                println!("Unknown command");
+                                eprintln!("Unknown command");
                             }
                         } else {
-                            println!(
+                            eprintln!(
                                 "Incomplete command, possible subcommands:\n{}",
                                 command_group
                                     .commands
@@ -137,6 +137,8 @@ fn main() {
                                     .join(", "),
                             );
                         }
+                    } else {
+                        eprintln!("Unknown command");
                     }
                 }
                 rl.add_history_entry(&line);
@@ -145,7 +147,7 @@ fn main() {
                 break;
             }
             Err(err) => {
-                println!("Error: {:?}", err);
+                eprintln!("Error: {:?}", err);
                 break;
             }
         }
