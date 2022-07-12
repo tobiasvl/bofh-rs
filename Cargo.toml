@@ -1,6 +1,6 @@
 [package]
 name = "bofh"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Command-line client for the Cerebrum IGA"
 license = "MIT"
