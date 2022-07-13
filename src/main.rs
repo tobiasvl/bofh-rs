@@ -104,6 +104,8 @@ fn main() {
     if args.vi {
         rl.set_edit_mode(rustyline::EditMode::Vi);
         rl.set_completion_type(rustyline::CompletionType::Circular);
+    } else {
+        rl.set_completion_type(rustyline::CompletionType::List);
     }
 
     if rl.load_history("history.txt").is_err() {

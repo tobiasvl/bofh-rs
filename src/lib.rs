@@ -80,7 +80,7 @@ pub struct Bofh {
 }
 
 impl Bofh {
-    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day (which is stored in [`self.motd`]).
+    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day (which is stored in [`self::motd`]).
     ///
     /// # Errors
     ///
@@ -105,7 +105,7 @@ impl Bofh {
                         .strip_prefix("Cerebrum.modules.bofhd.errors.")
                     {
                         if let Some(cerebrum_error) = bofhd_error.strip_prefix("CerebrumError:") {
-                            Err(BofhError::CerebrumError(cerebrum_error.to_string()))
+                            Err(BofhError::CerebrumError(cerebrum_error.to_owned()))
                         } else if bofhd_error.strip_prefix("ServerRestartedError:").is_some() {
                             //Err(BofhError::ServerRestartedError)
                             //self.init_commands(True);
@@ -120,7 +120,7 @@ impl Bofh {
                         fault.fault_string.strip_prefix("NotImplementedError:")
                     {
                         Err(BofhError::NotImplementedError(
-                            not_implemented_error.to_string(),
+                            not_implemented_error.to_owned(),
                         ))
                     } else {
                         Err(BofhError::Fault(fault.fault_string.clone()))
@@ -199,7 +199,7 @@ impl Bofh {
                                         .get("optional")
                                         .or(Some(&Value::Bool(false)))
                                     {
-                                        Some(Value::Bool(value)) => value.to_owned(),
+                                        Some(Value::Bool(value)) => *value,
                                         Some(Value::String(value)) => {
                                             matches!(value.as_str(), "True")
                                         }
@@ -207,7 +207,7 @@ impl Bofh {
                                     },
                                     repeat: match strct.get("repeat").or(Some(&Value::Bool(false)))
                                     {
-                                        Some(Value::Bool(value)) => value.to_owned(),
+                                        Some(Value::Bool(value)) => *value,
                                         Some(Value::String(value)) => {
                                             matches!(value.as_str(), "True")
                                         }
@@ -215,16 +215,16 @@ impl Bofh {
                                     },
                                     default: strct
                                         .get("default")
-                                        .map(|x| x.as_str().unwrap().to_string()),
+                                        .map(|x| x.as_str().unwrap().to_owned()),
                                     arg_type: strct
                                         .get("type")
-                                        .map(|x| x.as_str().unwrap().to_string()),
+                                        .map(|x| x.as_str().unwrap().to_owned()),
                                     help_ref: strct
                                         .get("help_ref")
-                                        .map(|x| x.as_str().unwrap().to_string()),
+                                        .map(|x| x.as_str().unwrap().to_owned()),
                                     prompt: strct
                                         .get("prompt")
-                                        .map(|x| x.as_str().unwrap().to_string()),
+                                        .map(|x| x.as_str().unwrap().to_owned()),
                                 });
                             }
                             vector
@@ -283,7 +283,7 @@ impl Bofh {
             self.run_raw_command("login", &[username, &password])?
                 .as_str()
                 .expect("Invalid bofhd session identifier")
-                .to_string(),
+                .to_owned(),
         );
         self.get_commands()
     }
@@ -302,7 +302,7 @@ impl Bofh {
             .run_raw_command("get_motd", &[])?
             .as_str()
             .expect("Invalid bofhd response")
-            .to_string())
+            .to_owned())
     }
 }
 
