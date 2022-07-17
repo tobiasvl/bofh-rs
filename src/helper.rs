@@ -1,11 +1,15 @@
+use colored::Colorize;
 use rustyline::Context;
 use rustyline::{
     completion::{Completer, Pair},
+    highlight::Highlighter,
     hint::Hinter,
 };
-use rustyline_derive::{Helper, Highlighter, Validator};
+use rustyline_derive::{Helper, Validator};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-#[derive(Helper, Validator, Highlighter)]
+use Cow::{Borrowed, Owned};
+#[derive(Helper, Validator)]
 pub(crate) struct BofhHelper<'a> {
     pub(crate) commands: &'a BTreeMap<String, bofh::CommandGroup>,
 }
@@ -57,7 +61,7 @@ impl Hinter for BofhHelper<'_> {
         let mut word_pos = pos - spaces;
 
         let command_candidates = self.command_candidates(words[0]);
-        let subcommand_candidates = if words.len() > 1 {
+        let subcommand_candidates = if words.len() > 1 && command_candidates.len() == 1 {
             self.subcommand_candidates(command_candidates[0], words[1])
         } else {
             vec![]
@@ -155,6 +159,7 @@ impl Completer for BofhHelper<'_> {
         let words: Vec<&str> = line.split_whitespace().collect();
         let spaces = line.matches(char::is_whitespace).count();
         let mut word_pos = pos - spaces;
+        let command_candidates = self.command_candidates(words[0]);
 
         // Complete commands
         let candidates: Vec<&str> = if words.is_empty() {
@@ -163,19 +168,22 @@ impl Completer for BofhHelper<'_> {
         } else if words.len() == 1 {
             if line.ends_with(char::is_whitespace) {
                 // Complete subcommands
-                if let Some(command_group) = self.commands.get(words[0]) {
-                    word_pos -= words[0].len();
-                    command_group.commands.keys().map(String::as_str).collect()
+                if command_candidates.len() == 1 {
+                    if let Some(command_group) = self.commands.get(command_candidates[0]) {
+                        word_pos -= words[0].len();
+                        command_group.commands.keys().map(String::as_str).collect()
+                    } else {
+                        vec![]
+                    }
                 } else {
                     vec![]
                 }
             } else {
                 // Complete command group
-                self.command_candidates(words[0])
+                command_candidates
             }
         } else if words.len() == 2 && !line.ends_with(char::is_whitespace) {
             word_pos -= words[0].len();
-            let command_candidates = self.command_candidates(words[0]);
             // Complete subcommand
             if command_candidates.len() == 1 {
                 self.subcommand_candidates(command_candidates[0], words[1])
@@ -200,5 +208,59 @@ impl Completer for BofhHelper<'_> {
                 })
                 .collect(),
         ))
+    }
+}
+
+impl Highlighter for BofhHelper<'_> {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Owned(format!("{}", hint.bright_black()))
+    }
+
+    fn highlight<'l>(&self, line: &'l str, _: usize) -> Cow<'l, str> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+
+        if words.is_empty() {
+            return Borrowed(line);
+        }
+
+        let command_candidates = self.command_candidates(words[0]);
+        let subcommand_candidates = if words.len() > 1 && command_candidates.len() == 1 {
+            self.subcommand_candidates(command_candidates[0], words[1])
+        } else {
+            vec![]
+        };
+
+        let mut line = line.replace(
+            words[0],
+            &format!(
+                "{}",
+                match command_candidates.len() {
+                    0 => words[0].red(),
+                    1 => words[0].green(),
+                    _ => words[0].yellow(),
+                }
+            ),
+        );
+
+        if words.len() > 1 {
+            line = line.replace(
+                words[1],
+                &format!(
+                    "{}",
+                    match subcommand_candidates.len() {
+                        0 => words[1].red(),
+                        1 => words[1].green(),
+                        _ => words[1].yellow(),
+                    }
+                ),
+            );
+        }
+
+        Owned(line)
+    }
+
+    // TODO can highlighting be optimized?
+    fn highlight_char(&self, _line: &str, _pos: usize) -> bool {
+        true
     }
 }

@@ -7,7 +7,7 @@ Features
 --------
 
 * Tab completion
-* Command and argument hints as you type
+* Command and argument hints as you type (with colors)
 * Persistent history
 * Emacs/Bash or Vi-style editing mode
 

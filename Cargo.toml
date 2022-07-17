@@ -1,6 +1,6 @@
 [package]
 name = "bofh"
-version = "0.0.5"
+version = "0.0.6"
 authors = ["Tobias V. Langhoff"]
 edition = "2021"
 description = "Command-line client for the Cerebrum IGA"
@@ -17,3 +17,4 @@ rustyline-derive = "0.6"
 clap = { version = "3.2", features = ["derive"] }
 whoami = "1.2"
 rpassword = "6.0"
+colored = "2.0"
