@@ -1,10 +1,12 @@
 [package]
 name = "bofh"
-version = "0.0.4"
+version = "0.0.5"
+authors = ["Tobias V. Langhoff"]
 edition = "2021"
 description = "Command-line client for the Cerebrum IGA"
 license = "MIT"
 repository = "https://github.com/tobiasvl/bofh-rs"
+documentation = "https://docs.rs/bofh"
 categories = ["api-bindings", "command-line-utilities"]
 
 [dependencies]

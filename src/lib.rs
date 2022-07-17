@@ -33,6 +33,8 @@ pub enum BofhError {
 pub struct Command {
     /// The actual, full bofhd command name, which can be supplied to [`Bofh::run_command`]
     pub fullname: String,
+    /// The name of this subcommand
+    pub name: String,
     /// Valid arguments to this command
     pub args: Vec<Argument>,
     /// Output format suggestion for clients
@@ -114,7 +116,8 @@ impl Bofh {
                             //Err(BofhError::SessionExpiredError(request))
                             todo!() // TODO
                         } else {
-                            unimplemented!()
+                            //unimplemented!()
+                            Err(BofhError::Fault(bofhd_error.to_owned()))
                         }
                     } else if let Some(not_implemented_error) =
                         fault.fault_string.strip_prefix("NotImplementedError:")
@@ -188,6 +191,7 @@ impl Bofh {
             commands.get_mut(cmd_group).unwrap().commands.insert(
                 array[0].as_array().unwrap()[1].as_str().unwrap().into(),
                 Command {
+                    name: array[0].as_array().unwrap()[1].as_str().unwrap().into(),
                     fullname: cmd.into(),
                     args: match &array[1] {
                         Value::Array(array) => {

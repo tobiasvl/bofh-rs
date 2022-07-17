@@ -117,20 +117,25 @@ fn main() {
             Ok(line) => {
                 let command: Vec<&str> = line.split_whitespace().collect();
                 if !command.is_empty() {
-                    if let Some(command_group) = commands.get(command[0]) {
+                    let candidates = rl.helper().unwrap().command_candidates(command[0]);
+                    if candidates.len() == 1 {
+                        let command_group = commands.get(candidates[0]).unwrap();
                         if command.len() > 1 {
-                            if let Some(subcommand) = command_group.commands.get(command[1]) {
+                            let candidates = rl.helper().unwrap().subcommand_candidates(candidates[0], command[1]);
+                            if candidates.len() == 1 {
+                                let subcommand = command_group.commands.get(candidates[0]).unwrap();
                                 match bofh.run_command(subcommand.fullname.as_str(), &command[2..])
                                 {
                                     Ok(ok) => println!("{:?}", ok),
                                     Err(err) => eprintln!("{}", err),
                                 }
                             } else {
-                                eprintln!("Unknown command");
+                                eprintln!("Unknown command '{} {}'", command[0], command[1]);
                             }
                         } else {
                             eprintln!(
-                                "Incomplete command, possible subcommands:\n{}",
+                                "Incomplete command '{}', possible subcommands:\n{}",
+                                command_group.name,
                                 command_group
                                     .commands
                                     .keys()
@@ -140,7 +145,7 @@ fn main() {
                             );
                         }
                     } else {
-                        eprintln!("Unknown command");
+                        eprintln!("Unknown command '{}'", command[0]);
                     }
                 }
                 rl.add_history_entry(&line);

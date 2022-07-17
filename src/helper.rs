@@ -10,24 +10,69 @@ pub(crate) struct BofhHelper<'a> {
     pub(crate) commands: &'a BTreeMap<String, bofh::CommandGroup>,
 }
 
+impl BofhHelper<'_> {
+    pub(crate) fn command_candidates(&self, prefix: &str) -> Vec<&str> {
+        self.commands
+            .keys()
+            .filter_map(|command| {
+                if command.starts_with(prefix) {
+                    Some(command.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn subcommand_candidates(&self, command: &str, prefix: &str) -> Vec<&str> {
+        if let Some(command) = self.commands.get(command) {
+            command
+                .commands
+                .keys()
+                .filter_map(|command| {
+                    if command.starts_with(prefix) {
+                        Some(command.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+}
+
 impl Hinter for BofhHelper<'_> {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        if line.is_empty() || pos < line.len() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+
+        if words.is_empty() || pos < line.len() {
             return None;
         }
 
-        let words: Vec<&str> = line.split_whitespace().collect();
         let spaces = line.matches(char::is_whitespace).count();
         let mut word_pos = pos - spaces;
 
+        let command_candidates = self.command_candidates(words[0]);
+        let subcommand_candidates = if words.len() > 1 {
+            self.subcommand_candidates(command_candidates[0], words[1])
+        } else {
+            vec![]
+        };
+
         // Hint arguments
         if words.len() >= 2 {
-            if let Some(command) = self.commands.get(words[0]) {
-                if let Some(subcommand) = command.commands.get(words[1]) {
-                    let args_to_hint = subcommand.args.len() - words.len() + 2;
-                    if args_to_hint <= subcommand.args.len() {
+            // We can only hint arguments if we know the command and subcommand
+            if command_candidates.len() == 1 && subcommand_candidates.len() == 1 {
+                let command = self.commands.get(command_candidates[0]).unwrap();
+                let subcommand = command.commands.get(subcommand_candidates[0]).unwrap();
+                // Hint arguments if subcommand is complete or unambiguously partial
+                if words[1] == subcommand.name || line.ends_with(char::is_whitespace) {
+                    // TODO reduce this:
+                    if words.len() >= 2 {
                         return Some(format!(
                             "{}{}",
                             if line.ends_with(char::is_whitespace) {
@@ -35,7 +80,7 @@ impl Hinter for BofhHelper<'_> {
                             } else {
                                 " "
                             },
-                            subcommand.args[subcommand.args.len() - args_to_hint..]
+                            subcommand.args[words.len() - 2..]
                                 .iter()
                                 .filter_map(|arg| arg.arg_type.clone())
                                 .collect::<Vec<String>>()
@@ -59,27 +104,26 @@ impl Hinter for BofhHelper<'_> {
         // Hint commands
         let candidates: Vec<&str> = if words.len() == 1 {
             // Complete command group
-            self.commands
-                .keys()
-                .filter_map(|command| {
-                    if command.starts_with(words[0]) && command != words[0] {
-                        Some(command.as_str())
-                    } else {
+            command_candidates
+                .iter()
+                .filter_map(|&command| {
+                    if command == words[0] {
                         None
+                    } else {
+                        Some(command)
                     }
                 })
                 .collect()
         } else if words.len() == 2 {
             word_pos -= words[0].len();
-            if let Some(command) = self.commands.get(words[0]) {
-                command
-                    .commands
-                    .keys()
-                    .filter_map(|command| {
-                        if command.starts_with(words[1]) && command != words[1] {
-                            Some(command.as_str())
-                        } else {
+            if command_candidates.len() == 1 {
+                subcommand_candidates
+                    .iter()
+                    .filter_map(|&command| {
+                        if command == words[1] {
                             None
+                        } else {
+                            Some(command)
                         }
                     })
                     .collect()
@@ -117,7 +161,7 @@ impl Completer for BofhHelper<'_> {
             // Completing on an empty line shows all command groups
             self.commands.keys().map(String::as_str).collect()
         } else if words.len() == 1 {
-            let candidates = if line.ends_with(char::is_whitespace) {
+            if line.ends_with(char::is_whitespace) {
                 // Complete subcommands
                 if let Some(command_group) = self.commands.get(words[0]) {
                     word_pos -= words[0].len();
@@ -127,33 +171,14 @@ impl Completer for BofhHelper<'_> {
                 }
             } else {
                 // Complete command group
-                self.commands
-                    .keys()
-                    .filter_map(|command| {
-                        if command.starts_with(words[0]) {
-                            Some(command.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            };
-            candidates
+                self.command_candidates(words[0])
+            }
         } else if words.len() == 2 && !line.ends_with(char::is_whitespace) {
             word_pos -= words[0].len();
+            let command_candidates = self.command_candidates(words[0]);
             // Complete subcommand
-            if let Some(command) = self.commands.get(words[0]) {
-                command
-                    .commands
-                    .keys()
-                    .filter_map(|command| {
-                        if command.starts_with(words[1]) {
-                            Some(command.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+            if command_candidates.len() == 1 {
+                self.subcommand_candidates(command_candidates[0], words[1])
             } else {
                 vec![]
             }
