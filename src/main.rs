@@ -94,12 +94,10 @@ fn main() {
         }
     };
 
-    let helper = BofhHelper {
+    let mut rl = Editor::new().expect("Failed to connect to terminal/TTY");
+    rl.set_helper(Some(BofhHelper {
         commands: &commands,
-    };
-
-    let mut rl = Editor::<BofhHelper>::new();
-    rl.set_helper(Some(helper));
+    }));
 
     if args.vi {
         rl.set_edit_mode(rustyline::EditMode::Vi);
@@ -121,7 +119,10 @@ fn main() {
                     if candidates.len() == 1 {
                         let command_group = commands.get(candidates[0]).unwrap();
                         if command.len() > 1 {
-                            let candidates = rl.helper().unwrap().subcommand_candidates(candidates[0], command[1]);
+                            let candidates = rl
+                                .helper()
+                                .unwrap()
+                                .subcommand_candidates(candidates[0], command[1]);
                             if candidates.len() == 1 {
                                 let subcommand = command_group.commands.get(candidates[0]).unwrap();
                                 match bofh.run_command(subcommand.fullname.as_str(), &command[2..])
