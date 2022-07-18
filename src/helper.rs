@@ -159,39 +159,42 @@ impl Completer for BofhHelper<'_> {
         let words: Vec<&str> = line.split_whitespace().collect();
         let spaces = line.matches(char::is_whitespace).count();
         let mut word_pos = pos - spaces;
-        let command_candidates = self.command_candidates(words[0]);
 
         // Complete commands
         let candidates: Vec<&str> = if words.is_empty() {
             // Completing on an empty line shows all command groups
             self.commands.keys().map(String::as_str).collect()
-        } else if words.len() == 1 {
-            if line.ends_with(char::is_whitespace) {
-                // Complete subcommands
-                if command_candidates.len() == 1 {
-                    if let Some(command_group) = self.commands.get(command_candidates[0]) {
-                        word_pos -= words[0].len();
-                        command_group.commands.keys().map(String::as_str).collect()
+        } else {
+            let command_candidates = self.command_candidates(words[0]);
+
+            if words.len() == 1 {
+                if line.ends_with(char::is_whitespace) {
+                    // Complete subcommands
+                    if command_candidates.len() == 1 {
+                        if let Some(command_group) = self.commands.get(command_candidates[0]) {
+                            word_pos -= words[0].len();
+                            command_group.commands.keys().map(String::as_str).collect()
+                        } else {
+                            vec![]
+                        }
                     } else {
                         vec![]
                     }
                 } else {
+                    // Complete command group
+                    command_candidates
+                }
+            } else if words.len() == 2 && !line.ends_with(char::is_whitespace) {
+                word_pos -= words[0].len();
+                // Complete subcommand
+                if command_candidates.len() == 1 {
+                    self.subcommand_candidates(command_candidates[0], words[1])
+                } else {
                     vec![]
                 }
             } else {
-                // Complete command group
-                command_candidates
-            }
-        } else if words.len() == 2 && !line.ends_with(char::is_whitespace) {
-            word_pos -= words[0].len();
-            // Complete subcommand
-            if command_candidates.len() == 1 {
-                self.subcommand_candidates(command_candidates[0], words[1])
-            } else {
                 vec![]
             }
-        } else {
-            vec![]
         };
 
         Ok((
