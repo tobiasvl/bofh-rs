@@ -202,7 +202,12 @@ impl Completer for BofhHelper<'_> {
             candidates
                 .iter()
                 .map(|&candidate| Pair {
-                    display: candidate.to_owned(),
+                    // FIXME move this to highlight_candidate when that accepts a completion::Candidate
+                    display: format!(
+                        "{}{}",
+                        &candidate[..word_pos].green(),
+                        &candidate[word_pos..].bright_green().bold()
+                    ),
                     replacement: if candidates.len() == 1 {
                         format!("{} ", &candidate[word_pos..])
                     } else {
@@ -238,9 +243,9 @@ impl Highlighter for BofhHelper<'_> {
             &format!(
                 "{}",
                 match command_candidates.len() {
-                    0 => words[0].red(),
-                    1 => words[0].green(),
-                    _ => words[0].yellow(),
+                    0 => words[0].bright_red().bold(),
+                    1 => words[0].bright_green().bold(),
+                    _ => words[0].bright_yellow().bold(),
                 }
             ),
         );
@@ -251,9 +256,9 @@ impl Highlighter for BofhHelper<'_> {
                 &format!(
                     "{}",
                     match subcommand_candidates.len() {
-                        0 => words[1].red(),
-                        1 => words[1].green(),
-                        _ => words[1].yellow(),
+                        0 => words[1].bright_red().bold(),
+                        1 => words[1].bright_green().bold(),
+                        _ => words[1].bright_yellow().bold(),
                     }
                 ),
             );
