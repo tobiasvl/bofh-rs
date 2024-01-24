@@ -311,7 +311,6 @@ impl Bofh {
 }
 
 impl Drop for Bofh {
-    #[allow(clippy::let_underscore_drop)]
     /// Logs the user out of the bofhd session.
     fn drop(&mut self) {
         if self.session.is_some() {

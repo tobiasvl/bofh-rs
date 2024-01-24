@@ -76,7 +76,7 @@ impl Hinter for BofhHelper<'_> {
                 // Hint arguments if subcommand is complete or unambiguously partial
                 if words[1] == subcommand.name || line.ends_with(char::is_whitespace) {
                     // TODO reduce this:
-                    if words.len() >= 2 {
+                    if words.len() >= 2 && words.len() < subcommand.args.len() + 2 {
                         return Some(format!(
                             "{}{}",
                             if line.ends_with(char::is_whitespace) {
@@ -203,6 +203,7 @@ impl Completer for BofhHelper<'_> {
                 .iter()
                 .map(|&candidate| Pair {
                     // FIXME move this to highlight_candidate when that accepts a completion::Candidate
+                    // See https://github.com/kkawakam/rustyline/issues/642
                     display: format!(
                         "{}{}",
                         &candidate[..word_pos].green(),
@@ -238,37 +239,34 @@ impl Highlighter for BofhHelper<'_> {
             vec![]
         };
 
-        let mut line = line.replace(
-            words[0],
-            &format!(
-                "{}",
-                match command_candidates.len() {
-                    0 => words[0].bright_red().bold(),
-                    1 => words[0].bright_green().bold(),
-                    _ => words[0].bright_yellow().bold(),
-                }
-            ),
-        );
+        Owned({
+            fn colorize_command(candidates: &Vec<&str>, line: &str, word: &str) -> String {
+                line.replacen(
+                    word,
+                    &format!(
+                        "{}",
+                        match candidates.len() {
+                            0 => word.bright_red().bold(),
+                            1 => word.bright_green().bold(),
+                            _ => word.bright_yellow().bold(),
+                        }
+                    ),
+                    1,
+                )
+            }
 
-        if words.len() > 1 {
-            line = line.replace(
-                words[1],
-                &format!(
-                    "{}",
-                    match subcommand_candidates.len() {
-                        0 => words[1].bright_red().bold(),
-                        1 => words[1].bright_green().bold(),
-                        _ => words[1].bright_yellow().bold(),
-                    }
-                ),
-            );
-        }
+            let line = colorize_command(&command_candidates, line, words[0]);
 
-        Owned(line)
+            if words.len() > 1 {
+                colorize_command(&subcommand_candidates, &line, words[1])
+            } else {
+                line
+            }
+        })
     }
 
     // TODO can highlighting be optimized?
-    fn highlight_char(&self, _line: &str, _pos: usize) -> bool {
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
         true
     }
 }

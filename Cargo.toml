@@ -12,9 +12,9 @@ categories = ["api-bindings", "command-line-utilities"]
 [dependencies]
 xmlrpc = "0.15"
 thiserror = "1.0"
-rustyline = "10"
-rustyline-derive = "0.7"
-clap = { version = "3.2", features = ["derive"] }
+rustyline = "13"
+rustyline-derive = "0.10"
+clap = { version = "4", features = ["derive"] }
 whoami = "1.2"
 rpassword = "7.0"
 colored = "2.0"
