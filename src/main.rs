@@ -62,7 +62,7 @@ struct Args {
     vi: bool,
 
     /// use a custom prompt
-    #[clap(long, short, help_heading = "REPL behavior", default_value_t = String::from("bofh> "))]
+    #[clap(long, short, help_heading = "Prompt", default_value_t = String::from("bofh> "))]
     prompt: String,
 }
 

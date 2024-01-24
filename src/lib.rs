@@ -5,84 +5,84 @@ use xmlrpc::{Request, Value};
 /// Errors that might occur when communicating with a bofhd server.
 #[derive(Error, Debug)]
 pub enum BofhError {
-    /// Error occurring in the XML-RPC protocol
+    /// Error occurring in the XML-RPC protocol.
     #[error("{0}")]
     XmlRpcError(#[from] xmlrpc::Error),
-    /// Attempted to run authenticated command before session was established
+    /// Attempted to run authenticated command before session was established.
     #[error("Attempted to run authenticated command before session was established")]
     NoSessionError,
-    /// Error in a Cerebrum/bofhd command
+    /// Error in a Cerebrum/bofhd command.
     #[error("{0}")]
     CerebrumError(String),
-    /// Server restarted in the middle of the session
+    /// Server restarted in the middle of the session.
     #[error("Server restarted")]
     ServerRestartedError,
-    /// Session has expired, and the client must re-authenticate
+    /// Session has expired, and the client must re-authenticate.
     #[error("Session expired")]
     SessionExpiredError,
-    /// The bofhd server reported that a command was not implemented
+    /// The bofhd server reported that a command was not implemented.
     #[error("{0}")]
     NotImplementedError(String),
-    /// XML-RPC request reported a fault
+    /// XML-RPC request reported a fault.
     #[error("{0}")]
     Fault(String),
 }
 
-/// A bofhd command
+/// A bofhd command.
 #[derive(Debug, Clone)]
 pub struct Command {
-    /// The actual, full bofhd command name, which can be supplied to [`Bofh::run_command`]
+    /// The actual, full bofhd command name, which can be supplied to [`Bofh::run_command`].
     pub fullname: String,
-    /// The name of this subcommand
+    /// The name of this subcommand.
     pub name: String,
-    /// Valid arguments to this command
+    /// Valid arguments to this command.
     pub args: Vec<Argument>,
-    /// Output format suggestion for clients
+    /// Output format suggestion for clients.
     pub format_suggestion: Option<String>,
-    /// Help text for command, supplied by the server
+    /// Help text for command, supplied by the server.
     pub help: Option<String>,
 }
 
-/// An argument for a bofhd command
+/// An argument for a bofhd command.
 #[derive(Debug, Default, Clone)]
 pub struct Argument {
-    /// Whether this argument is optional or required
+    /// Whether this argument is optional or required.
     pub optional: bool,
-    /// Whether this argument can be repeated
+    /// Whether this argument can be repeated.
     pub repeat: bool,
-    /// The default value for this argument
+    /// The default value for this argument.
     pub default: Option<String>,
-    /// The argument type
+    /// The argument type.
     pub arg_type: Option<String>,
-    /// The help reference that should be used for this argument, if the client requests help
+    /// The help reference that should be used for this argument, if the client requests help.
     pub help_ref: Option<String>,
-    /// The prompt that should be used for this argument, if it's not supplied
+    /// The prompt that should be used for this argument, if it's not supplied.
     pub prompt: Option<String>,
 }
 
 #[derive(Debug)]
 enum ArgType {}
 
-/// A bofhd command group, ie. semantically linked command prefixes
+/// A bofhd command group, ie. semantically linked command prefixes.
 #[derive(Debug, Clone)]
 pub struct CommandGroup {
-    /// The common prefix of the grouped commands
+    /// The common prefix of the grouped commands.
     pub name: String,
-    /// The command group's subcommands
+    /// The command group's subcommands.
     pub commands: BTreeMap<String, Command>,
 }
 
-/// The bofh client communicating with the bofhd server
+/// The bofh client communicating with the bofhd server.
 pub struct Bofh {
-    /// The URL to the bofhd server
+    /// The URL to the bofhd server.
     pub url: String,
-    /// The Message Of The Day provided by the bofhd server after connection
+    /// The Message Of The Day provided by the bofhd server after connection.
     pub motd: Option<String>,
     session: Option<String>,
 }
 
 impl Bofh {
-    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day (which is stored in [`self::motd`]).
+    /// Creates a new connection to a bofhd server, and tests the connection by requesting the server's Message of the Day (which is stored in [`Self::motd`]).
     ///
     /// # Errors
     ///
@@ -116,7 +116,6 @@ impl Bofh {
                             //Err(BofhError::SessionExpiredError(request))
                             todo!() // TODO
                         } else {
-                            //unimplemented!()
                             Err(BofhError::Fault(bofhd_error.to_owned()))
                         }
                     } else if let Some(not_implemented_error) =
@@ -246,7 +245,7 @@ impl Bofh {
 
     /// Run a bofh command on the bofhd server.
     ///
-    /// Note that this function actually runs the bofhd command `run_command bofh_command`, and can't be used to run raw bofhd commands. Those are all exposed through separate functions.
+    /// Note that this function actually runs the bofhd command `run_command bofh_command`, and can't be used to run raw bofhd commands. Those are all exposed through separate functions, such as [`Self::login`] and [`Self::get_motd`].
     ///
     /// # Errors
     ///
@@ -292,7 +291,7 @@ impl Bofh {
         self.get_commands()
     }
 
-    /// Get the current Message of the Day from the bofhd server
+    /// Get the current Message of the Day from the bofhd server.
     ///
     /// # Errors
     ///

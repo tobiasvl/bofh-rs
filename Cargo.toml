@@ -1,6 +1,6 @@
 [package]
 name = "bofh"
-version = "0.0.8"
+version = "0.0.9"
 authors = ["Tobias V. Langhoff"]
 edition = "2021"
 description = "Command-line client for the Cerebrum IGA"
