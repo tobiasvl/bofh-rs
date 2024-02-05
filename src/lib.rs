@@ -97,7 +97,7 @@ impl Bofh {
         Ok(bofh)
     }
 
-    fn run_request(&self, request: Request) -> Result<Value, BofhError> {
+    fn run_request(&self, request: &Request) -> Result<Value, BofhError> {
         match request.call_url(&self.url) {
             Ok(result) => Ok(result),
             Err(err) => {
@@ -109,12 +109,9 @@ impl Bofh {
                         if let Some(cerebrum_error) = bofhd_error.strip_prefix("CerebrumError:") {
                             Err(BofhError::CerebrumError(cerebrum_error.to_owned()))
                         } else if bofhd_error.strip_prefix("ServerRestartedError:").is_some() {
-                            //Err(BofhError::ServerRestartedError)
-                            //self.init_commands(True);
-                            self.run_request(request)
+                            Err(BofhError::ServerRestartedError)
                         } else if bofhd_error.strip_prefix("SessionExpiredError:").is_some() {
-                            //Err(BofhError::SessionExpiredError(request))
-                            todo!() // TODO
+                            Err(BofhError::SessionExpiredError)
                         } else {
                             Err(BofhError::Fault(bofhd_error.to_owned()))
                         }
@@ -139,7 +136,7 @@ impl Bofh {
         for arg in args {
             request = request.arg(*arg);
         }
-        self.run_request(request)
+        self.run_request(&request)
     }
 
     fn run_raw_sess_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
@@ -148,9 +145,8 @@ impl Bofh {
             for arg in args {
                 request = request.arg(*arg);
             }
-            self.run_request(request)
+            self.run_request(&request)
         } else {
-            // TODO Maybe just panic here instead, this should never happen
             Err(BofhError::NoSessionError)
         }
     }
@@ -173,7 +169,16 @@ impl Bofh {
     // get_default_param(session, command, args)
     // get_format_suggestion(command)
 
-    fn get_commands(&mut self) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
+    /// Returns the commands available to the current user on the bofh server.
+    ///
+    /// # Errors
+    ///
+    /// Will return a [`BofhError::NoSessionError`] if the user isn't logged in (with [`Self::login`]).
+    ///
+    /// # Panics
+    ///
+    /// Should normally not panic, but it might happen if the bofhd server returns malformed data.
+    pub fn get_commands(&self) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
         let response = self.run_raw_sess_command("get_commands", &[])?;
         let mut commands = BTreeMap::<String, CommandGroup>::new();
         for (cmd, array) in response.as_struct().unwrap() {
@@ -245,7 +250,8 @@ impl Bofh {
 
     /// Run a bofh command on the bofhd server.
     ///
-    /// Note that this function actually runs the bofhd command `run_command bofh_command`, and can't be used to run raw bofhd commands. Those are all exposed through separate functions, such as [`Self::login`] and [`Self::get_motd`].
+    /// Note that this function actually runs the raw bofhd command `run_command bofh_command`, and can't be used to run
+    /// arbitrary raw bofhd commands. Those are all exposed through separate functions, such as [`Self::login`] and [`Self::get_motd`].
     ///
     /// # Errors
     ///
@@ -264,7 +270,10 @@ impl Bofh {
         self.run_raw_sess_command("run_command", &args)
     }
 
-    /// Authenticate with the bofhd server and set up a session. Returns the commands available to the authenticated user.
+    /// Authenticate with the bofhd server and set up a session.
+    ///
+    /// Returns the commands available to the authenticated user. These commands can be re-requested later with [`Self::get_commands`] without logging in again, for example when
+    /// handling a [`BofhError::ServerRestartedError`] (which might occur if a new version of bofhd is deployed, with new commands).
     ///
     /// Note that this consumes `password` to discourage user-facing clients from holding onto the user's password.
     /// If the user needs to reauthenticate (if [`Self::run_command`] later returns a [`BofhError::SessionExpiredError`], for example), please prompt the user for the password again.

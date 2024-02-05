@@ -86,18 +86,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE; // FIXME errors on windows?
     };
 
-    let commands = match bofh.login(&args.user, password) {
-        Ok(commands) => commands,
+    let mut rl = Editor::new().expect("Failed to connect to terminal/TTY");
+
+    match bofh.login(&args.user, password) {
+        Ok(commands) => rl.set_helper(Some(BofhHelper { commands })),
         Err(err) => {
             eprintln!("{err}");
             return ExitCode::FAILURE;
         }
     };
-
-    let mut rl = Editor::new().expect("Failed to connect to terminal/TTY");
-    rl.set_helper(Some(BofhHelper {
-        commands: &commands,
-    }));
 
     if args.vi {
         rl.set_edit_mode(rustyline::EditMode::Vi);
@@ -113,28 +110,76 @@ fn main() -> ExitCode {
     loop {
         match rl.readline(&args.prompt) {
             Ok(line) => {
-                let command: Vec<&str> = line.split_whitespace().collect();
+                let split_line: Vec<&str> = line.split_whitespace().collect();
                 let helper = rl.helper().expect("Failed to get rustyline helper");
-                if !command.is_empty() {
-                    let candidates: Vec<&str> = helper.command_candidates(command[0]);
+                if !split_line.is_empty() {
+                    let candidates: Vec<&str> = helper.command_candidates(split_line[0]);
                     if candidates.len() == 1 {
-                        let command_group = commands.get(candidates[0]).expect(
+                        let command_group = helper.commands.get(candidates[0]).expect(
                             "Failed to retrieve command group (this shouldn't be possible)",
                         );
-                        if command.len() > 1 {
+                        if split_line.len() > 1 {
                             let candidates =
-                                helper.subcommand_candidates(candidates[0], command[1]);
+                                helper.subcommand_candidates(candidates[0], split_line[1]);
                             if candidates.len() == 1 {
                                 let subcommand = command_group.commands.get(candidates[0]).expect(
                                     "Failed to retrieve subcommand (this shouldn't be possible)",
                                 );
-                                match bofh.run_command(subcommand.fullname.as_str(), &command[2..])
-                                {
-                                    Ok(msg) => println!("{msg:?}"),
-                                    Err(msg) => eprintln!("{msg}"),
+                                let actual_subcommand = subcommand.fullname.as_str();
+                                let command_args = split_line[2..].to_vec();
+                                match bofh.run_command(actual_subcommand, &command_args) {
+                                    Ok(msg) => {
+                                        println!("{msg:?}");
+                                    }
+                                    Err(e) => match e {
+                                        bofh::BofhError::ServerRestartedError => {
+                                            // The server was restarted; let's get the valid commands again as they might have changed
+                                            let commands = match bofh.get_commands() {
+                                                Ok(commands) => commands,
+                                                Err(err) => {
+                                                    eprintln!("{err}");
+                                                    return ExitCode::FAILURE;
+                                                }
+                                            };
+                                            // Re-run the command
+                                            match bofh.run_command(actual_subcommand, &command_args)
+                                            {
+                                                Ok(msg) => println!("{msg:?}"),
+                                                Err(e) => eprintln!("{e}"),
+                                            }
+                                            // We have to set the helper with the new commands last, otherwise the borrow checker freaks out
+                                            rl.set_helper(Some(BofhHelper { commands }));
+                                        }
+                                        bofh::BofhError::SessionExpiredError => {
+                                            // The session expired; re-authenticate the user
+                                            eprintln!("Session expired, please reauthenticate");
+                                            let Ok(password) = prompt_password(format!(
+                                                "Password for {}: ",
+                                                &args.user
+                                            )) else {
+                                                return ExitCode::FAILURE; // FIXME errors on windows?
+                                            };
+                                            let commands = match bofh.login(&args.user, password) {
+                                                Ok(commands) => commands,
+                                                Err(err) => {
+                                                    eprintln!("{err}");
+                                                    return ExitCode::FAILURE;
+                                                }
+                                            };
+                                            // Re-run the command
+                                            match bofh.run_command(actual_subcommand, &command_args)
+                                            {
+                                                Ok(msg) => println!("{msg:?}"),
+                                                Err(e) => eprintln!("{e}"),
+                                            }
+                                            // We have to set the helper with the new commands last, otherwise the borrow checker freaks out
+                                            rl.set_helper(Some(BofhHelper { commands }));
+                                        }
+                                        _ => eprintln!("{e}"),
+                                    },
                                 }
                             } else {
-                                eprintln!("Unknown command '{} {}'", command[0], command[1]);
+                                eprintln!("Unknown command '{} {}'", split_line[0], split_line[1]);
                             }
                         } else {
                             eprintln!(
@@ -149,11 +194,12 @@ fn main() -> ExitCode {
                             );
                         }
                     } else {
-                        eprintln!("Unknown command '{}'", command[0]);
+                        eprintln!("Unknown command '{}'", split_line[0]);
                     }
-                }
-                if let Err(err) = rl.add_history_entry(&line) {
-                    eprintln!("Unable to save command to history: {err:?}");
+
+                    if let Err(err) = rl.add_history_entry(&line) {
+                        eprintln!("Unable to save command to history: {err:?}");
+                    }
                 }
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
@@ -165,6 +211,7 @@ fn main() -> ExitCode {
             }
         }
     }
+    // We adhere to the bofh tradition of printing a sci-fi farewell message upon logout
     println!("Go, then - there are other worlds than these.");
     rl.append_history("history.txt")
         .expect("Unable to write history to history.txt");

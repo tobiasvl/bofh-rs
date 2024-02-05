@@ -9,12 +9,13 @@ use rustyline_derive::{Helper, Validator};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use Cow::{Borrowed, Owned};
+
 #[derive(Helper, Validator)]
-pub(crate) struct BofhHelper<'a> {
-    pub(crate) commands: &'a BTreeMap<String, bofh::CommandGroup>,
+pub(crate) struct BofhHelper {
+    pub(crate) commands: BTreeMap<String, bofh::CommandGroup>,
 }
 
-impl BofhHelper<'_> {
+impl BofhHelper {
     pub(crate) fn command_candidates(&self, prefix: &str) -> Vec<&str> {
         self.commands
             .keys()
@@ -47,7 +48,7 @@ impl BofhHelper<'_> {
     }
 }
 
-impl Hinter for BofhHelper<'_> {
+impl Hinter for BofhHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
@@ -147,7 +148,7 @@ impl Hinter for BofhHelper<'_> {
     }
 }
 
-impl Completer for BofhHelper<'_> {
+impl Completer for BofhHelper {
     type Candidate = Pair;
 
     fn complete(
@@ -220,7 +221,7 @@ impl Completer for BofhHelper<'_> {
     }
 }
 
-impl Highlighter for BofhHelper<'_> {
+impl Highlighter for BofhHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
         Owned(format!("{}", hint.bright_black()))
     }
