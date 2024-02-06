@@ -291,6 +291,9 @@ impl Bofh {
         username: &str,
         password: String,
     ) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
+        if self.session.is_some() {
+            let _ = self.run_raw_sess_command("logout", &[]);
+        }
         self.session = Some(
             self.run_raw_command("login", &[username, &password])?
                 .as_str()
