@@ -57,7 +57,7 @@ struct Args {
     timeout: u8,
 
     /// use vi tab completion (circular) and command mode (cheatsheet:
-    /// https://catonmat.net/ftp/bash-vi-editing-mode-cheat-sheet.pdf)
+    /// <https://catonmat.net/ftp/bash-vi-editing-mode-cheat-sheet.pdf>)
     #[clap(long, help_heading = "REPL behavior", alias = "vim")]
     vi: bool,
 
@@ -69,7 +69,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    println!("Connecting to {}\n", &args.url);
+    println!("Connecting to {}\n", args.url);
     let mut bofh = match Bofh::new(args.url) {
         Ok(bofh) => bofh,
         Err(err) => {
@@ -109,7 +109,7 @@ fn main() -> ExitCode {
             eprintln!("{err}");
             return ExitCode::FAILURE;
         }
-    };
+    }
 
     if args.vi {
         rl.set_edit_mode(rustyline::EditMode::Vi);

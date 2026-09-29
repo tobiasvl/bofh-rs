@@ -94,7 +94,7 @@ impl Hinter for BofhHelper {
                     }
                 }
             }
-        };
+        }
 
         // If we're not hinting arguments, and the line ends in a whitespace, we shouldn't hint.
         // This fixes a bug where inserting spaces when a hint has appeared will push the hint towards the right.
@@ -207,8 +207,8 @@ impl Completer for BofhHelper {
                     // See https://github.com/kkawakam/rustyline/issues/642
                     display: format!(
                         "{}{}",
-                        &candidate[..word_pos].green(),
-                        &candidate[word_pos..].bright_green().bold()
+                        candidate[..word_pos].green(),
+                        candidate[word_pos..].bright_green().bold()
                     ),
                     replacement: if candidates.len() == 1 {
                         format!("{} ", &candidate[word_pos..])
@@ -241,7 +241,7 @@ impl Highlighter for BofhHelper {
         };
 
         Owned({
-            fn colorize_command(candidates: &Vec<&str>, line: &str, word: &str) -> String {
+            fn colorize_command(candidates: &[&str], line: &str, word: &str) -> String {
                 line.replacen(
                     word,
                     &format!(
