@@ -1,8 +1,8 @@
 [package]
 name = "bofh"
-version = "0.0.9"
+version = "0.0.10"
 authors = ["Tobias V. Langhoff"]
-edition = "2021"
+edition = "2024"
 description = "Command-line client for the Cerebrum IGA"
 license = "MIT"
 repository = "https://github.com/tobiasvl/bofh-rs"
@@ -15,6 +15,6 @@ thiserror = "1.0"
 rustyline = "13"
 rustyline-derive = "0.10"
 clap = { version = "4", features = ["derive"] }
-whoami = "1.2"
-rpassword = "7.0"
-colored = "2.0"
+whoami = "1.6"
+rpassword = "7.5"
+colored = "2.2"
