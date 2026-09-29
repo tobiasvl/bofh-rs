@@ -1,6 +1,6 @@
 [package]
 name = "bofh"
-version = "0.0.10"
+version = "0.0.11"
 authors = ["Tobias V. Langhoff"]
 edition = "2024"
 description = "Command-line client for the Cerebrum IGA"
@@ -11,10 +11,10 @@ categories = ["api-bindings", "command-line-utilities"]
 
 [dependencies]
 xmlrpc = "0.15"
-thiserror = "1.0"
-rustyline = "13"
-rustyline-derive = "0.10"
+thiserror = "2.0"
+rustyline = "18"
+rustyline-derive = "0.12"
 clap = { version = "4", features = ["derive"] }
-whoami = "1.6"
+whoami = "2.1"
 rpassword = "7.5"
-colored = "2.2"
+colored = "3.1"

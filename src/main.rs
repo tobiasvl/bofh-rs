@@ -39,9 +39,9 @@ struct Args {
     #[clap(long, help_heading = "Connection settings", default_value_t = String::from("https://cerebrum-uio-test.uio.no:8000/"))]
     url: String,
 
-    /// authenticate as USER
-    #[clap(long, short, help_heading = "Connection settings", default_value_t = whoami::username())]
-    user: String,
+    /// authenticate as USER (defaults to the current user)
+    #[clap(long, short, help_heading = "Connection settings")]
+    user: Option<String>,
 
     /// skip certificate hostname validation
     #[clap(long, help_heading = "Connection settings")]
@@ -82,13 +82,28 @@ fn main() -> ExitCode {
         println!("{motd}\n");
     }
 
-    let Ok(password) = prompt_password(format!("Password for {}: ", &args.user)) else {
+    let mut rl = Editor::new().expect("Failed to connect to terminal/TTY");
+
+    let user = match args.user.or_else(|| whoami::username().ok()) {
+        Some(user) => user,
+        None => loop {
+            match rl.readline("Username: ") {
+                Ok(line) if !line.trim().is_empty() => break line.trim().to_owned(),
+                Ok(_) => (),
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => return ExitCode::FAILURE,
+                Err(err) => {
+                    eprintln!("Error: {err:?}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        },
+    };
+
+    let Ok(password) = prompt_password(format!("Password for {user}: ")) else {
         return ExitCode::FAILURE; // FIXME errors on windows?
     };
 
-    let mut rl = Editor::new().expect("Failed to connect to terminal/TTY");
-
-    match bofh.login(&args.user, password) {
+    match bofh.login(&user, password) {
         Ok(commands) => rl.set_helper(Some(BofhHelper { commands })),
         Err(err) => {
             eprintln!("{err}");
@@ -153,13 +168,12 @@ fn main() -> ExitCode {
                                         bofh::BofhError::SessionExpiredError => {
                                             // The session expired; re-authenticate the user
                                             eprintln!("Session expired, please reauthenticate");
-                                            let Ok(password) = prompt_password(format!(
-                                                "Password for {}: ",
-                                                &args.user
-                                            )) else {
+                                            let Ok(password) =
+                                                prompt_password(format!("Password for {user}: "))
+                                            else {
                                                 return ExitCode::FAILURE; // FIXME errors on windows?
                                             };
-                                            let commands = match bofh.login(&args.user, password) {
+                                            let commands = match bofh.login(&user, password) {
                                                 Ok(commands) => commands,
                                                 Err(err) => {
                                                     eprintln!("{err}");

@@ -2,7 +2,7 @@ use colored::Colorize;
 use rustyline::Context;
 use rustyline::{
     completion::{Completer, Pair},
-    highlight::Highlighter,
+    highlight::{CmdKind, Highlighter},
     hint::Hinter,
 };
 use rustyline_derive::{Helper, Validator};
@@ -267,7 +267,7 @@ impl Highlighter for BofhHelper {
     }
 
     // TODO can highlighting be optimized?
-    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+    fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
         true
     }
 }
