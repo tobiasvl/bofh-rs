@@ -4,7 +4,7 @@ mod helper;
 mod internal;
 mod parser;
 use crate::helper::BofhHelper;
-use crate::internal::InternalCommand;
+use crate::internal::{InternalCommand, Script, Source};
 use crate::parser::split_words;
 use rpassword::prompt_password;
 use rustyline::{Editor, config::Configurer, error::ReadlineError, history::FileHistory};
@@ -14,6 +14,10 @@ use std::process::ExitCode;
 
 /// The rustyline editor, once it knows which commands the bofhd server offers.
 type BofhEditor = Editor<BofhHelper, FileHistory>;
+
+/// How many `source` commands may be nested, so that a file sourcing itself stops rather than
+/// filling memory with lines to run.
+const MAX_SOURCE_DEPTH: usize = 16;
 
 /// The Cerebrum Bofh client
 #[derive(Parser, Debug)]
@@ -156,12 +160,30 @@ fn repl(
     user: &str,
     prompt: &str,
 ) -> Result<(), Box<dyn Error>> {
+    // The file `script` is copying the session to, and the files `source` is reading commands
+    // from, innermost last. Both belong to the loop rather than to the commands that open them,
+    // since they outlive the command and only the loop sees every line.
+    let mut script: Option<Script> = None;
+    let mut sources: Vec<Source> = Vec::new();
+
     loop {
-        let line = match rl.readline(prompt) {
-            Ok(line) => line,
-            Err(ReadlineError::Interrupted | ReadlineError::Eof) => return Ok(()),
-            Err(err) => return Err(err.into()),
+        // A sourced line runs as if it had been typed, so it is echoed after the prompt to keep
+        // the transcript readable
+        let (line, line_number) = match next_sourced_line(&mut sources) {
+            Some((number, line)) => {
+                println!("{prompt}{line}");
+                (line, Some(number))
+            }
+            None => match rl.readline(prompt) {
+                Ok(line) => (line, None),
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => return Ok(()),
+                Err(err) => return Err(err.into()),
+            },
         };
+
+        if let Some(script) = script.as_mut() {
+            script.write(&format!("{prompt}{line}"));
+        }
 
         let words = match split_words(&line) {
             Ok(words) if words.is_empty() => continue,
@@ -172,17 +194,38 @@ fn repl(
             }
         };
 
+        let mut failed = words.is_none();
+
         if let Some(words) = words {
             let helper = rl.helper().expect("Failed to get rustyline helper");
             let completed = match resolve_command(helper, &words) {
-                Ok(resolved) => resolved.run(bofh, helper, user)?,
+                Ok(resolved) => resolved.run(bofh, helper, user, &mut script)?,
                 Err(message) => Outcome::Failed(message).into(),
             };
 
             match completed.outcome {
-                Outcome::Output(output) => println!("{output}"),
-                Outcome::Failed(message) => eprintln!("{message}"),
+                Outcome::Output(output) => {
+                    println!("{output}");
+                    tee(script.as_mut(), &output);
+                }
+                Outcome::Failed(message) => {
+                    eprintln!("{message}");
+                    tee(script.as_mut(), &message);
+                    failed = true;
+                }
                 Outcome::Quit => return Ok(()),
+                Outcome::Sourced(source) => {
+                    if sources.len() < MAX_SOURCE_DEPTH {
+                        sources.push(source);
+                    } else {
+                        eprintln!(
+                            "Not reading {}: already {MAX_SOURCE_DEPTH} files deep. \
+                             Does a sourced file source itself?",
+                            source.name
+                        );
+                        failed = true;
+                    }
+                }
             }
 
             // The session was re-established, so the helper needs to know about the server's
@@ -192,9 +235,51 @@ fn repl(
             }
         }
 
-        if let Err(err) = rl.add_history_entry(&line) {
-            eprintln!("Unable to save command to history: {err:?}");
+        match line_number {
+            // Sourced lines were never typed, so they don't belong in the history
+            Some(number) if failed => abort_source(&mut sources, number),
+            Some(_) => (),
+            None => {
+                if let Err(err) = rl.add_history_entry(&line) {
+                    eprintln!("Unable to save command to history: {err:?}");
+                }
+            }
         }
+    }
+}
+
+/// Copy a command's output to the script file, if one is open.
+fn tee(script: Option<&mut Script>, output: &str) {
+    if let Some(script) = script {
+        script.write(output);
+    }
+}
+
+/// The next line of the innermost file still being sourced, skipping past files that have run out.
+fn next_sourced_line(sources: &mut Vec<Source>) -> Option<(usize, String)> {
+    while let Some(source) = sources.last_mut() {
+        if let Some(line) = source.next_line() {
+            return Some(line);
+        }
+        sources.pop();
+    }
+    None
+}
+
+/// Stop reading the file a failing line came from, unless it was sourced with `--ignore-errors`.
+///
+/// Only the innermost file is given up on. A `source` that fails is a failing line like any other
+/// in the file that sourced it, and gets the same treatment there.
+fn abort_source(sources: &mut Vec<Source>, line: usize) {
+    let Some(source) = sources.last() else { return };
+
+    if !source.ignore_errors {
+        eprintln!(
+            "Sourcing of {name} aborted on line {line}\n\
+             Hint: use 'source --ignore-errors {name}' to carry on past errors",
+            name = source.name
+        );
+        sources.pop();
     }
 }
 
@@ -209,6 +294,8 @@ pub(crate) enum Outcome {
     /// refused. Fatal errors are the `Err` of the surrounding [`Result`] instead.
     Failed(String),
     Quit,
+    /// Run this file's commands next, as if they had been typed.
+    Sourced(Source),
 }
 
 /// What a command left for the REPL to do.
@@ -261,10 +348,11 @@ impl Resolved<'_> {
         bofh: &mut Bofh,
         helper: &BofhHelper,
         user: &str,
+        script: &mut Option<Script>,
     ) -> Result<Completed, Box<dyn Error>> {
         match self.target {
             Target::Internal(command) => {
-                Ok(internal::run(command, &self.args, bofh, helper).into())
+                Ok(internal::run(command, &self.args, bofh, helper, script).into())
             }
             Target::Server(command) => run_command(bofh, user, &command, &self.args),
         }
@@ -365,8 +453,9 @@ fn run_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{Resolved, Target, resolve_command};
+    use super::{Resolved, Target, abort_source, next_sourced_line, resolve_command};
     use crate::helper::tests::helper;
+    use crate::internal::tests::source_of;
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
@@ -421,5 +510,57 @@ mod tests {
             panic!("a bare command group should not resolve to a command");
         };
         assert!(message.contains("find, info"), "{message}");
+    }
+
+    #[test]
+    fn sourced_files_are_read_innermost_first() {
+        let mut sources = vec![
+            source_of("outer", false, &["user info outer"]),
+            source_of("inner", false, &["user info inner"]),
+        ];
+
+        let lines = std::iter::from_fn(|| next_sourced_line(&mut sources)).collect::<Vec<_>>();
+        // The inner file runs first, and the outer one carries on where it left off
+        assert_eq!(
+            lines,
+            [
+                (1, String::from("user info inner")),
+                (1, String::from("user info outer")),
+            ]
+        );
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn a_failing_line_gives_up_on_its_own_file_only() {
+        let mut sources = vec![
+            source_of("outer", false, &["user info outer"]),
+            source_of("inner", false, &["nonsense", "user info inner"]),
+        ];
+
+        // The line has already been taken off the file by the time it runs and fails
+        let (number, _) = next_sourced_line(&mut sources).expect("Nothing to run");
+        abort_source(&mut sources, number);
+        assert_eq!(
+            next_sourced_line(&mut sources),
+            Some((1, String::from("user info outer")))
+        );
+    }
+
+    #[test]
+    fn ignore_errors_carries_on_past_a_failing_line() {
+        let mut sources = vec![source_of("script", true, &["nonsense", "user info foo"])];
+
+        let (number, _) = next_sourced_line(&mut sources).expect("Nothing to run");
+        abort_source(&mut sources, number);
+        assert_eq!(
+            next_sourced_line(&mut sources),
+            Some((2, String::from("user info foo")))
+        );
+    }
+
+    #[test]
+    fn a_typed_line_that_fails_has_no_file_to_give_up_on() {
+        abort_source(&mut Vec::new(), 1);
     }
 }

@@ -7,7 +7,14 @@
 use crate::Outcome;
 use crate::helper::BofhHelper;
 use bofh::Bofh;
+use std::env;
 use std::fmt::Write;
+use std::fs::{File, OpenOptions, read_to_string};
+use std::io::Write as _;
+use std::path::PathBuf;
+
+/// The flag `source` takes, which may be abbreviated to any prefix of itself.
+const IGNORE_ERRORS: &str = "--ignore-errors";
 
 /// What the client should do when an internal command is run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +22,8 @@ enum Kind {
     Commands,
     Help,
     Quit,
+    Script,
+    Source,
 }
 
 /// A command the client answers locally.
@@ -54,6 +63,18 @@ pub(crate) const INTERNAL_COMMANDS: &[InternalCommand] = &[
         description: "log out and quit",
         kind: Kind::Quit,
     },
+    InternalCommand {
+        name: "script",
+        usage: "script | script <file>",
+        description: "copy the session to a file, or stop copying",
+        kind: Kind::Script,
+    },
+    InternalCommand {
+        name: "source",
+        usage: "source [--ignore-errors] <file>",
+        description: "run the commands in a file",
+        kind: Kind::Source,
+    },
 ];
 
 /// Look up an internal command by its full name.
@@ -69,11 +90,14 @@ pub(crate) fn run(
     args: &[&str],
     bofh: &Bofh,
     helper: &BofhHelper,
+    script_file: &mut Option<Script>,
 ) -> Outcome {
     match command.kind {
         Kind::Commands if args.is_empty() => Outcome::Output(commands(helper)),
         Kind::Quit if args.is_empty() => Outcome::Quit,
         Kind::Help => help(args, bofh, helper).map_or_else(Outcome::Failed, Outcome::Output),
+        Kind::Script => script(args, script_file).map_or_else(Outcome::Failed, Outcome::Output),
+        Kind::Source => source(args).map_or_else(Outcome::Failed, Outcome::Sourced),
         _ => Outcome::Failed(format!("Usage: {}", command.usage)),
     }
 }
@@ -160,12 +184,120 @@ fn general_help(bofh: &Bofh) -> Result<String, String> {
     Ok(help)
 }
 
+/// A file the session is being copied to by `script`.
+pub(crate) struct Script {
+    /// The path as the user gave it, for the messages about it.
+    name: String,
+    file: File,
+}
+
+impl Script {
+    /// Copy one line of the session to the file.
+    ///
+    /// A script file that has become unwritable is reported but doesn't end the session, which the
+    /// user is in the middle of and may not be able to resume.
+    pub(crate) fn write(&mut self, line: &str) {
+        if let Err(err) = writeln!(self.file, "{line}") {
+            eprintln!("Unable to write to script file {}: {err}", self.name);
+        }
+    }
+}
+
+/// Start or stop copying the session to a file.
+fn script(args: &[&str], script_file: &mut Option<Script>) -> Result<String, String> {
+    match args {
+        // The closing message is not itself copied, since the file is already shut by then
+        [] => Ok(match script_file.take() {
+            Some(open) => format!("Closing script file {}", open.name),
+            None => String::from("No script file is open"),
+        }),
+        [name] => {
+            let file = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(expand_tilde(name))
+                .map_err(|err| format!("Unable to open script file {name}: {err}"))?;
+            let name = (*name).to_owned();
+            // Opening a second script file closes the first
+            Ok(match script_file.replace(Script { name, file }) {
+                Some(closed) => {
+                    format!("Copying output to {}, closing {}", args[0], closed.name)
+                }
+                None => format!("Copying output to {}", args[0]),
+            })
+        }
+        _ => Err(String::from("Usage: script | script <file>")),
+    }
+}
+
+/// A file being read by `source`, and the lines of it that have yet to run.
+#[derive(Debug)]
+pub(crate) struct Source {
+    /// The path as the user gave it, for the messages about it.
+    pub(crate) name: String,
+    /// Whether a line that fails should stop the rest of the file from running.
+    pub(crate) ignore_errors: bool,
+    /// The lines worth running, each with the line number it had in the file.
+    lines: std::vec::IntoIter<(usize, String)>,
+}
+
+impl Source {
+    /// The next line to run, if the file has one left.
+    pub(crate) fn next_line(&mut self) -> Option<(usize, String)> {
+        self.lines.next()
+    }
+}
+
+/// Read a file of commands, to be run as if they had been typed.
+fn source(args: &[&str]) -> Result<Source, String> {
+    let (ignore_errors, name) = match args {
+        [name] => (false, name),
+        // pybofh lets the flag be abbreviated, down to a bare `-`
+        [flag, name] if !flag.is_empty() && IGNORE_ERRORS.starts_with(flag) => (true, name),
+        [flag, _] => return Err(format!("Expected {IGNORE_ERRORS}, found '{flag}'")),
+        _ => return Err(String::from("Usage: source [--ignore-errors] <file>")),
+    };
+
+    let text = read_to_string(expand_tilde(name)).map_err(|err| format!("{name}: {err}"))?;
+    // Blank lines and comments are dropped here rather than skipped while running, so that a file
+    // of nothing but comments doesn't leave the REPL with an empty source to step through
+    let lines: Vec<(usize, String)> = text
+        .lines()
+        .enumerate()
+        .map(|(index, line)| (index + 1, line.trim()))
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
+        .map(|(number, line)| (number, line.to_owned()))
+        .collect();
+
+    Ok(Source {
+        name: (*name).to_owned(),
+        ignore_errors,
+        lines: lines.into_iter(),
+    })
+}
+
+/// Expand a leading `~`.
+fn expand_tilde(path: &str) -> PathBuf {
+    let rest = match path {
+        "~" => Some(""),
+        path => path.strip_prefix("~/"),
+    };
+
+    // Let's not support `~someone-else`
+    rest.and_then(|rest| env::home_dir().map(|home| home.join(rest)))
+        .unwrap_or_else(|| PathBuf::from(path))
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{INTERNAL_COMMANDS, commands, lookup};
+pub(crate) mod tests {
+    use super::{
+        INTERNAL_COMMANDS, Script, Source, commands, expand_tilde, lookup, script, source,
+    };
     use crate::helper::BofhHelper;
     use bofh::{Argument, Command, CommandGroup};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::{env, fs};
 
     /// One group whose arguments cover every way an argument can be written out.
     fn helper() -> BofhHelper {
@@ -250,5 +382,150 @@ mod tests {
         assert!(lookup("halt_and_catch_fire").is_none());
         // Abbreviations are resolved before lookup, so only full names are ever looked up
         assert!(lookup("q").is_none());
+    }
+
+    /// A file of commands that has already been read, for tests that step through the lines
+    /// rather than read them.
+    pub(crate) fn source_of(name: &str, ignore_errors: bool, lines: &[&str]) -> Source {
+        Source {
+            name: name.to_owned(),
+            ignore_errors,
+            lines: lines
+                .iter()
+                .enumerate()
+                .map(|(index, &line)| (index + 1, line.to_owned()))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    /// An empty path of our own in the temporary directory, named after the test using it.
+    fn temp_path(test: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!("bofh-rs-{test}"));
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    /// Read a file of commands, and report the lines `source` kept and what it numbered them.
+    fn sourced(test: &str, contents: &str) -> Vec<(usize, String)> {
+        let path = temp_path(test);
+        fs::write(&path, contents).unwrap();
+        let mut source = source(&[path.to_str().unwrap()]).unwrap();
+
+        let mut lines = Vec::new();
+        while let Some(line) = source.next_line() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    #[test]
+    fn sourcing_keeps_the_line_numbers_of_the_lines_it_skips() {
+        // The numbers are what an error message points the user at, so they count the file as
+        // written, not the commands that came out of it
+        let lines = sourced(
+            "skipping",
+            "# a comment\nuser info foo\n\n   \n  user info bar  \n#\n",
+        );
+        assert_eq!(
+            lines,
+            [
+                (2, String::from("user info foo")),
+                (5, String::from("user info bar")),
+            ]
+        );
+    }
+
+    #[test]
+    fn sourcing_a_file_of_nothing_but_comments_yields_no_lines() {
+        assert!(sourced("comments", "# one\n\n# two\n").is_empty());
+    }
+
+    #[test]
+    fn the_ignore_errors_flag_can_be_abbreviated() {
+        let path = temp_path("flag");
+        fs::write(&path, "user info foo\n").unwrap();
+        let path = path.to_str().unwrap();
+
+        assert!(!source(&[path]).unwrap().ignore_errors);
+        for flag in ["--ignore-errors", "--ig", "-"] {
+            assert!(source(&[flag, path]).unwrap().ignore_errors, "{flag}");
+        }
+        assert_eq!(
+            source(&["--quietly", path]).unwrap_err(),
+            "Expected --ignore-errors, found '--quietly'"
+        );
+    }
+
+    #[test]
+    fn sourcing_a_file_that_is_not_there_fails() {
+        let missing = temp_path("missing");
+        let error = source(&[missing.to_str().unwrap()]).unwrap_err();
+        assert!(error.starts_with(missing.to_str().unwrap()), "{error}");
+    }
+
+    #[test]
+    fn a_script_file_is_opened_written_and_closed() {
+        let path = temp_path("script");
+        let name = path.to_str().unwrap();
+        let mut open: Option<Script> = None;
+
+        assert_eq!(
+            script(&[name], &mut open),
+            Ok(format!("Copying output to {name}"))
+        );
+        open.as_mut().unwrap().write("user info foo");
+        assert_eq!(
+            script(&[], &mut open),
+            Ok(format!("Closing script file {name}"))
+        );
+        assert!(open.is_none());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "user info foo\n");
+
+        // A second `script` appends to the file rather than truncating it
+        script(&[name], &mut open).unwrap();
+        open.as_mut().unwrap().write("user info bar");
+        script(&[], &mut open).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "user info foo\nuser info bar\n"
+        );
+    }
+
+    #[test]
+    fn closing_a_script_file_that_was_never_opened_is_not_an_error() {
+        let mut open: Option<Script> = None;
+        assert_eq!(
+            script(&[], &mut open),
+            Ok(String::from("No script file is open"))
+        );
+    }
+
+    #[test]
+    fn opening_a_second_script_file_closes_the_first() {
+        let first = temp_path("script-first");
+        let second = temp_path("script-second");
+        let (first, second) = (first.to_str().unwrap(), second.to_str().unwrap());
+        let mut open: Option<Script> = None;
+
+        script(&[first], &mut open).unwrap();
+        assert_eq!(
+            script(&[second], &mut open),
+            Ok(format!("Copying output to {second}, closing {first}"))
+        );
+        assert_eq!(
+            open.as_ref().map(|open| open.name.clone()),
+            Some(String::from(second))
+        );
+    }
+
+    #[test]
+    fn a_leading_tilde_is_expanded_but_someone_elses_is_not() {
+        let home = env::home_dir().expect("No home directory to expand '~' to");
+        assert_eq!(expand_tilde("~/scripts/foo"), home.join("scripts/foo"));
+        assert_eq!(expand_tilde("~"), home.join(""));
+        // Looking up another user's home needs a password database we have no business reading
+        assert_eq!(expand_tilde("~root/foo"), PathBuf::from("~root/foo"));
+        assert_eq!(expand_tilde("/tmp/foo"), PathBuf::from("/tmp/foo"));
     }
 }

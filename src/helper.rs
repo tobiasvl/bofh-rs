@@ -403,11 +403,20 @@ pub(crate) mod tests {
         assert_eq!(
             helper().command_candidates(""),
             [
-                "commands", "group", "help", "history", "logout", "person", "quit", "user"
+                "commands", "group", "help", "history", "logout", "person", "quit", "script",
+                "source", "user"
             ]
         );
         assert_eq!(helper().resolve_command_name("q"), Ok("quit"));
         assert_eq!(helper().resolve_command_name("pe"), Ok("person"));
+        // Two of the client's own commands can be ambiguous with each other, not just with the
+        // server's
+        assert_eq!(
+            helper().resolve_command_name("s"),
+            Err(String::from(
+                "Ambiguous command 's', could be: script, source"
+            ))
+        );
     }
 
     #[test]
