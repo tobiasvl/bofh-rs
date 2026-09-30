@@ -1,3 +1,4 @@
+use Cow::{Borrowed, Owned};
 use colored::Colorize;
 use rustyline::Context;
 use rustyline::{
@@ -8,7 +9,6 @@ use rustyline::{
 use rustyline_derive::{Helper, Validator};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use Cow::{Borrowed, Owned};
 
 #[derive(Helper, Validator)]
 pub(crate) struct BofhHelper {

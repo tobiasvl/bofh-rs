@@ -3,7 +3,7 @@ use clap::Parser;
 mod helper;
 use crate::helper::BofhHelper;
 use rpassword::prompt_password;
-use rustyline::{config::Configurer, error::ReadlineError, history::FileHistory, Editor};
+use rustyline::{Editor, config::Configurer, error::ReadlineError, history::FileHistory};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::process::ExitCode;
