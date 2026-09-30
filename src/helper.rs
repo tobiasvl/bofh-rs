@@ -221,6 +221,17 @@ impl Completer for BofhHelper {
     }
 }
 
+/// Colorize a (sub)command by how many commands it could still refer to: none, exactly one, or
+/// several.
+fn colorize_command(candidates: &[&str], word: &str) -> String {
+    match candidates.len() {
+        0 => word.bright_red().bold(),
+        1 => word.bright_green().bold(),
+        _ => word.bright_yellow().bold(),
+    }
+    .to_string()
+}
+
 impl Highlighter for BofhHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
         Owned(format!("{}", hint.bright_black()))
@@ -240,34 +251,123 @@ impl Highlighter for BofhHelper {
             vec![]
         };
 
-        Owned({
-            fn colorize_command(candidates: &[&str], line: &str, word: &str) -> String {
-                line.replacen(
-                    word,
-                    &format!(
-                        "{}",
-                        match candidates.len() {
-                            0 => word.bright_red().bold(),
-                            1 => word.bright_green().bold(),
-                            _ => word.bright_yellow().bold(),
-                        }
-                    ),
-                    1,
-                )
-            }
+        // The words are spliced in by byte offset rather than substring replacement, because the
+        // subcommand is usually also a prefix of the command group (eg. "person p"), so searching
+        // for it would find and colorize the wrong occurrence.
+        let mut highlighted = String::with_capacity(line.len());
+        let mut cursor = 0;
+        for (word, candidates) in words
+            .iter()
+            .zip([&command_candidates, &subcommand_candidates])
+        {
+            let start = cursor
+                + line[cursor..]
+                    .find(word)
+                    .expect("Failed to locate a word we just split out of the line");
+            highlighted.push_str(&line[cursor..start]);
+            highlighted.push_str(&colorize_command(candidates, word));
+            cursor = start + word.len();
+        }
+        highlighted.push_str(&line[cursor..]);
 
-            let line = colorize_command(&command_candidates, line, words[0]);
-
-            if words.len() > 1 {
-                colorize_command(&subcommand_candidates, &line, words[1])
-            } else {
-                line
-            }
-        })
+        Owned(highlighted)
     }
 
     // TODO can highlighting be optimized?
     fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BofhHelper, colorize_command};
+    use bofh::{Command, CommandGroup};
+    use rustyline::highlight::Highlighter;
+    use std::collections::BTreeMap;
+
+    fn helper() -> BofhHelper {
+        // `colored` turns itself off when stdout isn't a terminal, which it isn't under `cargo test`
+        colored::control::set_override(true);
+
+        let mut commands = BTreeMap::new();
+        for (group, subcommands) in [("person", ["info", "find"]), ("user", ["info", "password"])] {
+            commands.insert(
+                group.to_owned(),
+                CommandGroup {
+                    name: group.to_owned(),
+                    commands: subcommands
+                        .iter()
+                        .map(|&name| {
+                            (
+                                name.to_owned(),
+                                Command {
+                                    fullname: format!("{group}_{name}"),
+                                    name: name.to_owned(),
+                                    args: vec![],
+                                    format_suggestion: None,
+                                    help: None,
+                                },
+                            )
+                        })
+                        .collect(),
+                },
+            );
+        }
+        BofhHelper { commands }
+    }
+
+    /// Strip the ANSI escapes, so we can check that highlighting doesn't reorder the line itself.
+    fn strip_colors(line: &str) -> String {
+        let mut stripped = String::new();
+        let mut chars = line.chars();
+        while let Some(char) = chars.next() {
+            if char == '\u{1b}' {
+                for char in chars.by_ref() {
+                    if char == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                stripped.push(char);
+            }
+        }
+        stripped
+    }
+
+    #[test]
+    fn highlighting_preserves_the_line() {
+        for line in [
+            "person",
+            "person p",
+            "person info",
+            "user u",
+            "user info foo",
+            "  person   info  ",
+            "nonsense x y",
+        ] {
+            assert_eq!(strip_colors(&helper().highlight(line, line.len())), line);
+        }
+    }
+
+    #[test]
+    fn highlighting_colorizes_whole_words() {
+        // "p" also occurs inside "person", so searching for it would colorize the wrong occurrence
+        assert_eq!(
+            helper().highlight("person p", 8),
+            format!(
+                "{} {}",
+                colorize_command(&["person"], "person"),
+                colorize_command(&[], "p")
+            )
+        );
+        assert_eq!(
+            helper().highlight("user p", 6),
+            format!(
+                "{} {}",
+                colorize_command(&["user"], "user"),
+                colorize_command(&["password"], "p")
+            )
+        );
     }
 }
