@@ -1,7 +1,9 @@
 use bofh::{Bofh, BofhError, CommandGroup};
 use clap::Parser;
 mod helper;
+mod parser;
 use crate::helper::BofhHelper;
+use crate::parser::split_words;
 use rpassword::prompt_password;
 use rustyline::{Editor, config::Configurer, error::ReadlineError, history::FileHistory};
 use std::collections::BTreeMap;
@@ -159,21 +161,28 @@ fn repl(
             Err(err) => return Err(err.into()),
         };
 
-        let words: Vec<&str> = line.split_whitespace().collect();
-        if words.is_empty() {
-            continue;
-        }
-
-        let helper = rl.helper().expect("Failed to get rustyline helper");
-        match resolve_command(helper, &words) {
-            Ok(command) => {
-                // Getting a set of commands back means the session was re-established, so the
-                // helper needs to know about the server's (possibly changed) commands
-                if let Some(commands) = run_command(bofh, user, &command, &words[2..])? {
-                    rl.set_helper(Some(BofhHelper { commands }));
-                }
+        let words = match split_words(&line) {
+            Ok(words) if words.is_empty() => continue,
+            Ok(words) => Some(words),
+            Err(msg) => {
+                eprintln!("{msg}");
+                None
             }
-            Err(msg) => eprintln!("{msg}"),
+        };
+
+        if let Some(words) = words {
+            let helper = rl.helper().expect("Failed to get rustyline helper");
+            match resolve_command(helper, &words) {
+                Ok(command) => {
+                    let args: Vec<&str> = words[2..].iter().map(String::as_str).collect();
+                    // Getting a set of commands back means the session was re-established, so the
+                    // helper needs to know about the server's (possibly changed) commands
+                    if let Some(commands) = run_command(bofh, user, &command, &args)? {
+                        rl.set_helper(Some(BofhHelper { commands }));
+                    }
+                }
+                Err(msg) => eprintln!("{msg}"),
+            }
         }
 
         if let Err(err) = rl.add_history_entry(&line) {
@@ -190,8 +199,8 @@ fn repl(
 /// # Errors
 ///
 /// Returns a message meant for the user if the line doesn't name exactly one command.
-fn resolve_command(helper: &BofhHelper, words: &[&str]) -> Result<String, String> {
-    let groups = helper.command_candidates(words[0]);
+fn resolve_command(helper: &BofhHelper, words: &[String]) -> Result<String, String> {
+    let groups = helper.command_candidates(&words[0]);
     let [group] = groups[..] else {
         return Err(format!("Unknown command '{}'", words[0]));
     };
@@ -200,7 +209,7 @@ fn resolve_command(helper: &BofhHelper, words: &[&str]) -> Result<String, String
         .get(group)
         .expect("Failed to retrieve command group (this shouldn't be possible)");
 
-    let Some(&word) = words.get(1) else {
+    let Some(word) = words.get(1) else {
         return Err(format!(
             "Incomplete command '{}', possible subcommands:\n{}",
             group.name,
