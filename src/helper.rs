@@ -305,7 +305,6 @@ mod tests {
                                     fullname: format!("{group}_{name}"),
                                     name: name.to_owned(),
                                     args: vec![],
-                                    format_suggestion: None,
                                     help: None,
                                 },
                             )

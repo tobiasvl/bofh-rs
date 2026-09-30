@@ -252,7 +252,7 @@ fn run_command(
 ) -> Result<Option<BTreeMap<String, CommandGroup>>, Box<dyn Error>> {
     let error = match bofh.run_command(command, args) {
         Ok(msg) => {
-            println!("{msg:?}");
+            println!("{msg}");
             return Ok(None);
         }
         Err(error) => error,
@@ -275,7 +275,7 @@ fn run_command(
 
     // Re-run the command, now that the session works again
     match bofh.run_command(command, args) {
-        Ok(msg) => println!("{msg:?}"),
+        Ok(msg) => println!("{msg}"),
         Err(error) => eprintln!("{error}"),
     }
 

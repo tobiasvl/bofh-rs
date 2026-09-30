@@ -1,3 +1,7 @@
+pub mod formatting;
+
+pub use crate::formatting::FormatSuggestion;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -38,8 +42,6 @@ pub struct Command {
     pub name: String,
     /// Valid arguments to this command.
     pub args: Vec<Argument>,
-    /// Output format suggestion for clients.
-    pub format_suggestion: Option<String>,
     /// Help text for command, supplied by the server.
     pub help: Option<String>,
 }
@@ -120,6 +122,8 @@ pub struct Bofh {
     /// The Message Of The Day provided by the bofhd server after connection.
     pub motd: Option<String>,
     session: Option<String>,
+    /// Output format suggestion cache.
+    format_suggestions: BTreeMap<String, Option<FormatSuggestion>>,
 }
 
 impl Bofh {
@@ -133,6 +137,7 @@ impl Bofh {
             url,
             session: None,
             motd: None,
+            format_suggestions: BTreeMap::new(),
         };
         bofh.motd = Some(bofh.get_motd()?);
         Ok(bofh)
@@ -213,6 +218,9 @@ impl Bofh {
 
     /// Returns the commands available to the current user on the bofh server.
     ///
+    /// This also discards any cached format suggestions, since the usual reason to call it again
+    /// is that the server restarted and its commands may have changed.
+    ///
     /// # Errors
     ///
     /// Will return a [`BofhError::NoSessionError`] if the user isn't logged in (with [`Self::login`]).
@@ -220,8 +228,13 @@ impl Bofh {
     /// # Panics
     ///
     /// Should normally not panic, but it might happen if the bofhd server returns malformed data.
-    pub fn get_commands(&self) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
+    pub fn get_commands(&mut self) -> Result<BTreeMap<String, CommandGroup>, BofhError> {
         let response = self.run_raw_sess_command("get_commands", &[])?;
+
+        // Discard existing format suggestion cache, in case this is a server restart and commands
+        // have changed on the server.
+        self.format_suggestions.clear();
+
         let mut commands = BTreeMap::<String, CommandGroup>::new();
         for (cmd, array) in response.as_struct().unwrap() {
             let cmd_group = array[0].as_array().unwrap()[0].as_str().unwrap();
@@ -282,7 +295,6 @@ impl Bofh {
                         Value::String(_) => vec![Argument::default()], // prompt_func
                         _ => vec![],
                     },
-                    format_suggestion: None,
                     help: None,
                 },
             );
@@ -300,16 +312,50 @@ impl Bofh {
     /// Returns a [`BofhError`] if the command fails for some reason.
     ///
     /// If the bofhd session has expired and this function returns a [`BofhError::SessionExpiredError`], the client might want to reauthenticate using [`Self::login`] and then retry the command.
-    pub fn run_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
-        // TODO: Return a formatted value?
-        let args: Vec<&str> = {
+    pub fn run_command(&mut self, command: &str, args: &[&str]) -> Result<String, BofhError> {
+        let command_args: Vec<&str> = {
             let mut command_args = vec![command];
             for &arg in args {
                 command_args.push(arg);
             }
             command_args
         };
-        self.run_raw_sess_command("run_command", &args)
+        let response = self.run_raw_sess_command("run_command", &command_args)?;
+
+        Ok(match self.cached_format_suggestion(command) {
+            Some(suggestion) => suggestion.format(&response),
+            None => formatting::render_plain(&response),
+        })
+    }
+
+    /// Return the format suggestion for a command, fetching it the first time it's needed.
+    ///
+    /// A command that has no (or a malformed) suggestion gets the format suggestion `None`.
+    fn cached_format_suggestion(&mut self, command: &str) -> Option<&FormatSuggestion> {
+        if !self.format_suggestions.contains_key(command)
+            && let Ok(suggestion) = self.get_format_suggestion(command)
+        {
+            self.format_suggestions
+                .insert(command.to_owned(), suggestion);
+        }
+        self.format_suggestions.get(command)?.as_ref()
+    }
+
+    /// Ask the bofhd server for a format suggestion for a specific command's output.
+    ///
+    /// Returns `None` if the command has no format suggestion, in which case it returns a string
+    /// that the server has already formatted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
+    pub fn get_format_suggestion(
+        &self,
+        command: &str,
+    ) -> Result<Option<FormatSuggestion>, BofhError> {
+        Ok(FormatSuggestion::parse(
+            &self.run_raw_command("get_format_suggestion", &[command])?,
+        ))
     }
 
     /// Authenticate with the bofhd server and set up a session.

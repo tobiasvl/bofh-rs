@@ -82,6 +82,7 @@ version = "0.0.11"
 dependencies = [
  "clap",
  "colored",
+ "iso8601",
  "rpassword",
  "rustyline",
  "rustyline-derive",

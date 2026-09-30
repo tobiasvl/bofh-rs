@@ -11,6 +11,7 @@ categories = ["api-bindings", "command-line-utilities"]
 
 [dependencies]
 xmlrpc = "0.15"
+iso8601 = "0.4" # Used in xmlrpc Values
 thiserror = "2.0"
 rustyline = "18"
 rustyline-derive = "0.12"
