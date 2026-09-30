@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use thiserror::Error;
 use xmlrpc::{Request, Value};
@@ -63,6 +64,46 @@ pub struct Argument {
 #[derive(Debug)]
 enum ArgType {}
 
+/// Decode bofhd's encoding of values that XML-RPC can't express by itself.
+///
+/// XML-RPC has no nil type, so bofhd sends `None` as the string `":None"`, and escapes any string
+/// that really does start with a colon by prefixing it with another one.
+///
+/// Only the values of a struct are decoded, not its keys, which is also what pybofh does; bofhd
+/// only ever uses plain identifiers as keys.
+fn wash_value(value: Value) -> Value {
+    match value {
+        Value::String(string) => {
+            if string == ":None" {
+                Value::Nil
+            } else if let Some(string) = string.strip_prefix(':') {
+                Value::String(string.to_owned())
+            } else {
+                Value::String(string)
+            }
+        }
+        Value::Array(array) => Value::Array(array.into_iter().map(wash_value).collect()),
+        Value::Struct(strct) => Value::Struct(
+            strct
+                .into_iter()
+                .map(|(key, value)| (key, wash_value(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+/// Escape an argument that starts with a colon, which bofhd would otherwise strip.
+///
+/// This is the inverse of the escaping [`wash_value`] undoes.
+fn escape_argument(argument: &str) -> Cow<'_, str> {
+    if argument.starts_with(':') {
+        Cow::Owned(format!(":{argument}"))
+    } else {
+        Cow::Borrowed(argument)
+    }
+}
+
 /// A bofhd command group, ie. semantically linked command prefixes.
 #[derive(Debug, Clone)]
 pub struct CommandGroup {
@@ -99,7 +140,7 @@ impl Bofh {
 
     fn run_request(&self, request: &Request) -> Result<Value, BofhError> {
         match request.call_url(&self.url) {
-            Ok(result) => Ok(result),
+            Ok(result) => Ok(wash_value(result)),
             Err(err) => {
                 if let Some(fault) = err.fault() {
                     if let Some(bofhd_error) = fault
@@ -134,16 +175,17 @@ impl Bofh {
     fn run_raw_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         let mut request = Request::new(command);
         for arg in args {
-            request = request.arg(*arg);
+            request = request.arg(escape_argument(arg).as_ref());
         }
         self.run_request(&request)
     }
 
     fn run_raw_sess_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         if let Some(session) = &self.session {
+            // The session identifier comes from the server, so it's sent back unescaped
             let mut request = Request::new(command).arg(session.clone());
             for arg in args {
-                request = request.arg(*arg);
+                request = request.arg(escape_argument(arg).as_ref());
             }
             self.run_request(&request)
         } else {
@@ -332,9 +374,63 @@ impl Drop for Bofh {
 
 #[cfg(test)]
 mod tests {
-    use crate::Bofh;
+    use crate::{Bofh, escape_argument, wash_value};
+    use xmlrpc::Value;
+
     #[test]
     fn connect() {
         let _bofh = Bofh::new(String::from("https://cerebrum-uio-test.uio.no:8000"));
+    }
+
+    #[test]
+    fn washing_decodes_none_and_unescapes_colons() {
+        assert_eq!(wash_value(Value::from(":None")), Value::Nil);
+        assert_eq!(wash_value(Value::from("::None")), Value::from(":None"));
+        assert_eq!(wash_value(Value::from(":::foo")), Value::from("::foo"));
+        assert_eq!(wash_value(Value::from("None")), Value::from("None"));
+        assert_eq!(wash_value(Value::from("")), Value::from(""));
+        assert_eq!(wash_value(Value::Int(1)), Value::Int(1));
+    }
+
+    #[test]
+    fn washing_recurses_into_arrays_and_structs() {
+        assert_eq!(
+            wash_value(Value::Array(vec![
+                Value::from("None"),
+                Value::from(":None"),
+                Value::from("::None"),
+            ])),
+            Value::Array(vec![Value::from("None"), Value::Nil, Value::from(":None"),])
+        );
+        assert_eq!(
+            wash_value(Value::Struct(
+                [
+                    ("expire_date".to_owned(), Value::from(":None")),
+                    (
+                        "affiliations".to_owned(),
+                        Value::Array(vec![Value::from(":None")])
+                    ),
+                ]
+                .into()
+            )),
+            Value::Struct(
+                [
+                    ("expire_date".to_owned(), Value::Nil),
+                    ("affiliations".to_owned(), Value::Array(vec![Value::Nil])),
+                ]
+                .into()
+            )
+        );
+    }
+
+    /// Escaping an argument and washing it again should get us back what the user typed.
+    #[test]
+    fn escaping_an_argument_round_trips() {
+        for argument in ["foo", ":foo", "::foo", ":None", "", ":"] {
+            assert_eq!(
+                wash_value(Value::from(escape_argument(argument).as_ref())),
+                Value::from(argument)
+            );
+        }
     }
 }
