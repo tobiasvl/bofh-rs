@@ -398,6 +398,61 @@ impl Bofh {
         self.get_commands()
     }
 
+    /// Ask the bofhd server for its general help text: a blurb, then one line per command group.
+    ///
+    /// Only the groups the user is allowed to use are listed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
+    pub fn help(&self) -> Result<String, BofhError> {
+        self.help_request(&[])
+    }
+
+    /// Ask the bofhd server for the help text for a command group, eg. `user`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason, including a
+    /// [`BofhError::CerebrumError`] if the server doesn't know the group.
+    pub fn help_group(&self, group: &str) -> Result<String, BofhError> {
+        self.help_request(&[group])
+    }
+
+    /// Ask the bofhd server for the help text for a single command, eg. `user`, `info`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason, including a
+    /// [`BofhError::CerebrumError`] if the server doesn't know the command.
+    pub fn help_command(&self, group: &str, command: &str) -> Result<String, BofhError> {
+        self.help_request(&[group, command])
+    }
+
+    /// Ask the bofhd server what an argument means, given an [`Argument::help_ref`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason, including a
+    /// [`BofhError::CerebrumError`] if the server doesn't know the reference.
+    pub fn help_argument(&self, help_ref: &str) -> Result<String, BofhError> {
+        self.help_request(&["arg_help", help_ref])
+    }
+
+    /// Run bofhd's variadic `help`, which the four public forms above spell out.
+    ///
+    /// # Panics
+    ///
+    /// Will normally never panic, unless the help text returned by the bofhd server is in an
+    /// invalid format.
+    fn help_request(&self, topic: &[&str]) -> Result<String, BofhError> {
+        Ok(self
+            .run_raw_sess_command("help", topic)?
+            .as_str()
+            .expect("Invalid bofhd response")
+            .to_owned())
+    }
+
     /// Get the current Message of the Day from the bofhd server.
     ///
     /// The client identifies itself so the server can append a notice when the site expects a

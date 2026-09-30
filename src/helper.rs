@@ -1,3 +1,4 @@
+use crate::internal;
 use Cow::{Borrowed, Owned};
 use colored::Colorize;
 use rustyline::Context;
@@ -15,18 +16,57 @@ pub(crate) struct BofhHelper {
     pub(crate) commands: BTreeMap<String, bofh::CommandGroup>,
 }
 
+/// Resolve `word` to itself or any candidates it is a prefix of.
+fn resolve<'a>(candidates: &[&'a str], word: &str) -> Option<&'a str> {
+    match candidates {
+        [command] => Some(command),
+        candidates => candidates.iter().find(|&&command| command == word).copied(),
+    }
+}
+
+/// Explain to the user why a word didn't name exactly one command.
+fn ambiguity(candidates: &[&str], word: &str) -> String {
+    if candidates.is_empty() {
+        format!("Unknown command '{word}'")
+    } else {
+        format!(
+            "Ambiguous command '{word}', could be: {}",
+            candidates.join(", ")
+        )
+    }
+}
+
 impl BofhHelper {
+    /// Every command group (internal and from the server) that starts with `prefix`, sorted.
     pub(crate) fn command_candidates(&self, prefix: &str) -> Vec<&str> {
-        self.commands
-            .keys()
-            .filter_map(|command| {
-                if command.starts_with(prefix) {
-                    Some(command.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        let mut candidates: Vec<&str> = internal::INTERNAL_COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .chain(self.commands.keys().map(String::as_str))
+            .filter(|command| command.starts_with(prefix))
+            .collect();
+        candidates.sort_unstable();
+        candidates
+    }
+
+    /// Expand an abbreviated first word into the one command it names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message meant for the user if the word names no command, or more than one.
+    pub(crate) fn resolve_command_name(&self, word: &str) -> Result<&str, String> {
+        let candidates = self.command_candidates(word);
+        resolve(&candidates, word).ok_or_else(|| ambiguity(&candidates, word))
+    }
+
+    /// Expand an abbreviated subcommand of a command `group` into the one command it names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message meant for the user if the word names no command, or more than one.
+    pub(crate) fn resolve_subcommand_name(&self, group: &str, word: &str) -> Result<&str, String> {
+        let candidates = self.subcommand_candidates(group, word);
+        resolve(&candidates, word).ok_or_else(|| ambiguity(&candidates, &format!("{group} {word}")))
     }
 
     pub(crate) fn subcommand_candidates(&self, command: &str, prefix: &str) -> Vec<&str> {
@@ -164,7 +204,7 @@ impl Completer for BofhHelper {
         // Complete commands
         let candidates: Vec<&str> = if words.is_empty() {
             // Completing on an empty line shows all command groups
-            self.commands.keys().map(String::as_str).collect()
+            self.command_candidates("")
         } else {
             let command_candidates = self.command_candidates(words[0]);
 
@@ -280,18 +320,26 @@ impl Highlighter for BofhHelper {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{BofhHelper, colorize_command};
     use bofh::{Command, CommandGroup};
     use rustyline::highlight::Highlighter;
     use std::collections::BTreeMap;
 
-    fn helper() -> BofhHelper {
+    /// A helper over a handful of real command groups, chosen for the awkward cases: `history`
+    /// collides with the internal `help` on the prefix `h`, and `group add` is spelled out in full
+    /// while also being a prefix of `group add_admin`.
+    pub(crate) fn helper() -> BofhHelper {
         // `colored` turns itself off when stdout isn't a terminal, which it isn't under `cargo test`
         colored::control::set_override(true);
 
         let mut commands = BTreeMap::new();
-        for (group, subcommands) in [("person", ["info", "find"]), ("user", ["info", "password"])] {
+        for (group, subcommands) in [
+            ("group", &["add", "add_admin", "info"][..]),
+            ("history", &["show"][..]),
+            ("person", &["find", "info"][..]),
+            ("user", &["info", "password"][..]),
+        ] {
             commands.insert(
                 group.to_owned(),
                 CommandGroup {
@@ -347,6 +395,59 @@ mod tests {
         ] {
             assert_eq!(strip_colors(&helper().highlight(line, line.len())), line);
         }
+    }
+
+    #[test]
+    fn the_client_and_the_server_share_one_namespace() {
+        // Sorted as one list, not the client's commands and then the server's
+        assert_eq!(
+            helper().command_candidates(""),
+            [
+                "commands", "group", "help", "history", "logout", "person", "quit", "user"
+            ]
+        );
+        assert_eq!(helper().resolve_command_name("q"), Ok("quit"));
+        assert_eq!(helper().resolve_command_name("pe"), Ok("person"));
+    }
+
+    #[test]
+    fn an_abbreviation_has_to_be_unambiguous() {
+        // "h" is the interesting one: it is only ambiguous because the internal `help` sits in the
+        // same namespace as the server's `history`
+        assert_eq!(
+            helper().resolve_command_name("h"),
+            Err(String::from(
+                "Ambiguous command 'h', could be: help, history"
+            ))
+        );
+        assert_eq!(
+            helper().resolve_command_name("zzz"),
+            Err(String::from("Unknown command 'zzz'"))
+        );
+        assert_eq!(
+            helper().resolve_subcommand_name("user", "i"),
+            Ok("info") // only one candidate, so no exact match needed
+        );
+        assert_eq!(
+            helper().resolve_subcommand_name("user", "z"),
+            Err(String::from("Unknown command 'user z'"))
+        );
+    }
+
+    /// bofhd has 34 commands whose name is also the start of a sibling's, `group add` among them.
+    #[test]
+    fn a_command_spelled_out_in_full_beats_the_longer_ones_it_prefixes() {
+        assert_eq!(helper().resolve_subcommand_name("group", "add"), Ok("add"));
+        assert_eq!(
+            helper().resolve_subcommand_name("group", "add_"),
+            Ok("add_admin")
+        );
+        assert_eq!(
+            helper().resolve_subcommand_name("group", "a"),
+            Err(String::from(
+                "Ambiguous command 'group a', could be: add, add_admin"
+            ))
+        );
     }
 
     #[test]

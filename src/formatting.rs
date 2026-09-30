@@ -491,7 +491,10 @@ mod tests {
     fn binary_fields_are_decoded_as_text() {
         assert_eq!(render_value(&Value::Base64(b"ab\xc3\xa6".to_vec())), "abæ");
         // A bad byte costs us that byte, not the response
-        assert_eq!(render_value(&Value::Base64(b"a\xffb".to_vec())), "a\u{fffd}b");
+        assert_eq!(
+            render_value(&Value::Base64(b"a\xffb".to_vec())),
+            "a\u{fffd}b"
+        );
     }
 
     #[test]

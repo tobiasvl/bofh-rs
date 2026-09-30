@@ -1,8 +1,10 @@
 use bofh::{Bofh, BofhError, CommandGroup};
 use clap::Parser;
 mod helper;
+mod internal;
 mod parser;
 use crate::helper::BofhHelper;
+use crate::internal::InternalCommand;
 use crate::parser::split_words;
 use rpassword::prompt_password;
 use rustyline::{Editor, config::Configurer, error::ReadlineError, history::FileHistory};
@@ -172,16 +174,21 @@ fn repl(
 
         if let Some(words) = words {
             let helper = rl.helper().expect("Failed to get rustyline helper");
-            match resolve_command(helper, &words) {
-                Ok(command) => {
-                    let args: Vec<&str> = words[2..].iter().map(String::as_str).collect();
-                    // Getting a set of commands back means the session was re-established, so the
-                    // helper needs to know about the server's (possibly changed) commands
-                    if let Some(commands) = run_command(bofh, user, &command, &args)? {
-                        rl.set_helper(Some(BofhHelper { commands }));
-                    }
-                }
-                Err(msg) => eprintln!("{msg}"),
+            let completed = match resolve_command(helper, &words) {
+                Ok(resolved) => resolved.run(bofh, helper, user)?,
+                Err(message) => Outcome::Failed(message).into(),
+            };
+
+            match completed.outcome {
+                Outcome::Output(output) => println!("{output}"),
+                Outcome::Failed(message) => eprintln!("{message}"),
+                Outcome::Quit => return Ok(()),
+            }
+
+            // The session was re-established, so the helper needs to know about the server's
+            // (possibly changed) commands
+            if let Some(commands) = completed.commands {
+                rl.set_helper(Some(BofhHelper { commands }));
             }
         }
 
@@ -191,22 +198,102 @@ fn repl(
     }
 }
 
-/// Resolve a command line into the full bofhd command name, eg. `user_info`.
+/// What to tell the user after a command has run.
+///
+/// Both kinds of command report back the same way, so the REPL has one place that decides where
+/// output goes (which is where `script` will tee it to a file).
+pub(crate) enum Outcome {
+    /// Show this to the user.
+    Output(String),
+    /// Tell the user this went wrong, but carry on: a command they mistyped, or one bofhd
+    /// refused. Fatal errors are the `Err` of the surrounding [`Result`] instead.
+    Failed(String),
+    Quit,
+}
+
+/// What a command left for the REPL to do.
+struct Completed {
+    /// What to tell the user.
+    outcome: Outcome,
+    /// A refreshed command table, when the session had to be re-established while the command
+    /// ran. The helper is rebuilt from it even if the command itself then failed, since what
+    /// changed is the session, not the command.
+    commands: Option<BTreeMap<String, CommandGroup>>,
+}
+
+impl From<Outcome> for Completed {
+    /// Nothing happened to the session, which is the usual case.
+    fn from(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            commands: None,
+        }
+    }
+}
+
+/// A command line, resolved to one command and the arguments that follow it.
+///
+/// Only *where* the command runs differs between the two kinds, so that is all [`Target`] records.
+/// In particular the arguments are gathered here: an internal command is one word and a bofhd
+/// command is two, and there is no reason for the caller to have to know which it is counting.
+struct Resolved<'a> {
+    target: Target,
+    args: Vec<&'a str>,
+}
+
+/// Where a resolved command runs.
+enum Target {
+    /// In the client itself.
+    Internal(&'static InternalCommand),
+    /// On the server, under this full bofhd command name, eg. `user_info`.
+    Server(String),
+}
+
+impl Resolved<'_> {
+    /// Run the command, wherever it runs, and report what the REPL should do next.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bofhd session couldn't be re-established after the server expired
+    /// or restarted it, in which case the client can't carry on.
+    fn run(
+        self,
+        bofh: &mut Bofh,
+        helper: &BofhHelper,
+        user: &str,
+    ) -> Result<Completed, Box<dyn Error>> {
+        match self.target {
+            Target::Internal(command) => {
+                Ok(internal::run(command, &self.args, bofh, helper).into())
+            }
+            Target::Server(command) => run_command(bofh, user, &command, &self.args),
+        }
+    }
+}
+
+/// Resolve a command line into one command and its arguments.
 ///
 /// Both the command group and its subcommand can be abbreviated, as long as the abbreviation is
-/// unambiguous.
+/// unambiguous. Internal commands share the namespace of the command groups and so abbreviate the
+/// same way, but they take their arguments directly and have no subcommand.
 ///
 /// # Errors
 ///
 /// Returns a message meant for the user if the line doesn't name exactly one command.
-fn resolve_command(helper: &BofhHelper, words: &[String]) -> Result<String, String> {
-    let groups = helper.command_candidates(&words[0]);
-    let [group] = groups[..] else {
-        return Err(format!("Unknown command '{}'", words[0]));
-    };
+fn resolve_command<'a>(helper: &BofhHelper, words: &'a [String]) -> Result<Resolved<'a>, String> {
+    let arguments = |from: usize| words[from..].iter().map(String::as_str).collect();
+    let name = helper.resolve_command_name(&words[0])?;
+
+    if let Some(command) = internal::lookup(name) {
+        return Ok(Resolved {
+            target: Target::Internal(command),
+            args: arguments(1),
+        });
+    }
+
     let group = helper
         .commands
-        .get(group)
+        .get(name)
         .expect("Failed to retrieve command group (this shouldn't be possible)");
 
     let Some(word) = words.get(1) else {
@@ -222,24 +309,23 @@ fn resolve_command(helper: &BofhHelper, words: &[String]) -> Result<String, Stri
         ));
     };
 
-    let subcommands = helper.subcommand_candidates(&group.name, word);
-    let [subcommand] = subcommands[..] else {
-        return Err(format!("Unknown command '{} {}'", words[0], word));
-    };
+    let subcommand = helper.resolve_subcommand_name(&group.name, word)?;
 
-    Ok(group
-        .commands
-        .get(subcommand)
-        .expect("Failed to retrieve subcommand (this shouldn't be possible)")
-        .fullname
-        .clone())
+    Ok(Resolved {
+        target: Target::Server(
+            group
+                .commands
+                .get(subcommand)
+                .expect("Failed to retrieve subcommand (this shouldn't be possible)")
+                .fullname
+                .clone(),
+        ),
+        args: arguments(2),
+    })
 }
 
-/// Run a bofh command and print its result, transparently recovering from a restarted server or
-/// an expired session.
-///
-/// Returns the refreshed set of commands if the session had to be re-established, since the
-/// caller then needs to rebuild the rustyline helper.
+/// Run a bofh command on the server, transparently recovering from a restarted server or an
+/// expired session.
 ///
 /// # Errors
 ///
@@ -249,12 +335,9 @@ fn run_command(
     user: &str,
     command: &str,
     args: &[&str],
-) -> Result<Option<BTreeMap<String, CommandGroup>>, Box<dyn Error>> {
+) -> Result<Completed, Box<dyn Error>> {
     let error = match bofh.run_command(command, args) {
-        Ok(msg) => {
-            println!("{msg}");
-            return Ok(None);
-        }
+        Ok(output) => return Ok(Outcome::Output(output).into()),
         Err(error) => error,
     };
 
@@ -267,17 +350,76 @@ fn run_command(
             let password = prompt_password(format!("Password for {user}: "))?;
             bofh.login(user, password)?
         }
-        error => {
-            eprintln!("{error}");
-            return Ok(None);
-        }
+        error => return Ok(Outcome::Failed(error.to_string()).into()),
     };
 
     // Re-run the command, now that the session works again
-    match bofh.run_command(command, args) {
-        Ok(msg) => println!("{msg}"),
-        Err(error) => eprintln!("{error}"),
+    Ok(Completed {
+        outcome: match bofh.run_command(command, args) {
+            Ok(output) => Outcome::Output(output),
+            Err(error) => Outcome::Failed(error.to_string()),
+        },
+        commands: Some(commands),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Resolved, Target, resolve_command};
+    use crate::helper::tests::helper;
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_owned).collect()
     }
 
-    Ok(Some(commands))
+    /// The command a line names, as its full name plus the arguments left over.
+    fn resolve(words: &[String]) -> Result<(String, Vec<&str>), String> {
+        let Resolved { target, args } = resolve_command(&helper(), words)?;
+        Ok((
+            match target {
+                Target::Internal(command) => command.name.to_owned(),
+                Target::Server(command) => command,
+            },
+            args,
+        ))
+    }
+
+    #[test]
+    fn a_line_goes_either_to_the_client_or_to_the_server() {
+        assert_eq!(resolve(&words("quit")), Ok((String::from("quit"), vec![])));
+        assert_eq!(
+            resolve(&words("co")),
+            Ok((String::from("commands"), vec![]))
+        );
+        assert_eq!(
+            resolve(&words("user info foo")),
+            Ok((String::from("user_info"), vec!["foo"]))
+        );
+        assert_eq!(
+            resolve(&words("g add")),
+            Ok((String::from("group_add"), vec![]))
+        );
+    }
+
+    /// An internal command is one word and a bofhd command is two, which is exactly why the
+    /// arguments are gathered during resolution rather than counted by the caller afterwards.
+    #[test]
+    fn arguments_start_after_the_command_however_many_words_that_took() {
+        assert_eq!(
+            resolve(&words("help user info")),
+            Ok((String::from("help"), vec!["user", "info"]))
+        );
+        assert_eq!(
+            resolve(&words("user info foo bar")),
+            Ok((String::from("user_info"), vec!["foo", "bar"]))
+        );
+    }
+
+    #[test]
+    fn a_group_on_its_own_lists_its_subcommands() {
+        let Err(message) = resolve(&words("person")) else {
+            panic!("a bare command group should not resolve to a command");
+        };
+        assert!(message.contains("find, info"), "{message}");
+    }
 }
