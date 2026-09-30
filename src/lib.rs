@@ -7,6 +7,12 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use xmlrpc::{Request, Value};
 
+/// The name this client identifies itself as to a bofhd server.
+pub const CLIENT_ID: &str = "bofh-rs";
+
+/// The version this client identifies itself as to a bofhd server.
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Errors that might occur when communicating with a bofhd server.
 #[derive(Error, Debug)]
 pub enum BofhError {
@@ -139,7 +145,8 @@ impl Bofh {
             motd: None,
             format_suggestions: BTreeMap::new(),
         };
-        bofh.motd = Some(bofh.get_motd()?);
+        // bofhd returns an empty string when the site has no MOTD file and nothing to nag about
+        bofh.motd = Some(bofh.get_motd(CLIENT_ID, CLIENT_VERSION)?).filter(|motd| !motd.is_empty());
         Ok(bofh)
     }
 
@@ -393,6 +400,10 @@ impl Bofh {
 
     /// Get the current Message of the Day from the bofhd server.
     ///
+    /// The client identifies itself so the server can append a notice when the site expects a
+    /// newer version of it than `client_version`; see [`CLIENT_ID`] and [`CLIENT_VERSION`] for
+    /// what [`Self::new`] passes.
+    ///
     /// # Errors
     ///
     /// Returns a [`BofhError`] if the command fails for some reason.
@@ -400,9 +411,9 @@ impl Bofh {
     /// # Panics
     ///
     /// Will normally never panic, unless the Message of the Day returned by the bofhd server is in an invalid format.
-    pub fn get_motd(&self) -> Result<String, BofhError> {
+    pub fn get_motd(&self, client_id: &str, client_version: &str) -> Result<String, BofhError> {
         Ok(self
-            .run_raw_command("get_motd", &[])?
+            .run_raw_command("get_motd", &[client_id, client_version])?
             .as_str()
             .expect("Invalid bofhd response")
             .to_owned())
