@@ -320,7 +320,9 @@ fn ask_value(
             continue;
         }
 
-        let Some(map) = question.map else {
+        // A raw map was only ever there to be read: the server parses the answer itself, so it
+        // goes on exactly as typed
+        let Some(map) = question.map.filter(|map| !map.raw) else {
             return Ok(Some(answer));
         };
         match select(map, &answer) {
@@ -340,10 +342,13 @@ fn explain(server: &dyn Server, help_ref: Option<&str>) -> String {
     }
 }
 
-/// Turn what was typed at a prompt offering a list into the value to send.
+/// Turn a row number typed at a prompt offering a list into the value to send.
 ///
-/// A number picks a row; anything else is sent as it was typed, since bofhd's maps list the
-/// likely answers rather than the only acceptable ones.
+/// Only for a list the server will not read itself; a [`PromptMap::raw`] answer never comes here.
+/// Nothing but a row number will do: the values behind the rows are entity ids and the like, so
+/// an answer that names no row is a mistake to point out rather than a string to send on. Both
+/// other clients say so too — jbofh's `Value not in list` (`JBofh.java:605`) and pybofh's
+/// `Please type a number matching one of the items` (`readlineui.py`, since 0.11.0).
 fn select(map: &PromptMap, answer: &str) -> Result<String, String> {
     if is_multiple_selection(answer) {
         return Err(String::from(
@@ -351,9 +356,12 @@ fn select(map: &PromptMap, answer: &str) -> Result<String, String> {
         ));
     }
 
-    let Ok(number) = answer.parse::<usize>() else {
-        return Ok(answer.to_owned());
-    };
+    // Not `str::parse`, which also takes a leading `+`, and not `char::is_numeric`, which takes
+    // digits from every script: the list is numbered in ASCII and the answer should be too
+    let number = Some(answer)
+        .filter(|answer| answer.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|answer| answer.parse::<usize>().ok())
+        .ok_or_else(|| String::from("Answer with one of the numbers in the list"))?;
     let index = number
         .checked_sub(1)
         .ok_or_else(|| String::from("The list is numbered from 1"))?;
@@ -366,9 +374,10 @@ fn select(map: &PromptMap, answer: &str) -> Result<String, String> {
 
 /// Whether an answer picks several rows at once, as `1-3` or `1,2,5` do.
 ///
-/// Sending those means sending an argument that is a list, which bofhd expands into one run of
-/// the command per element — the same machinery parenthesised lists use, and not implemented
-/// yet. Until it is, saying so beats picking one of them silently.
+/// Over a list the client has to read, sending those means sending an argument that is a list,
+/// which bofhd expands into one run of the command per element — the same machinery parenthesised
+/// lists use, and not implemented yet. Until it is, saying so beats picking one of them silently.
+/// A [`PromptMap::raw`] answer has no such trouble and never reaches here.
 fn is_multiple_selection(answer: &str) -> bool {
     let parts: Vec<&str> = answer.split([',', '-']).collect();
 
@@ -735,6 +744,7 @@ mod tests {
                     label: (*label).to_owned(),
                 })
                 .collect(),
+            raw: false,
         }
     }
 
@@ -744,17 +754,66 @@ mod tests {
         assert_eq!(select(&map(), "3"), Ok(String::from("value3")));
     }
 
-    /// A map lists the likely answers, not the only ones, so anything else goes as it was typed.
+    /// The values behind the rows are entity ids and the like, so an answer naming no row is a
+    /// mistake rather than something to send on. Both other clients refuse it too.
     #[test]
-    fn anything_that_is_not_a_number_is_sent_as_typed() {
-        assert_eq!(select(&map(), "somewhere-else"), Ok(String::from("somewhere-else")));
-        assert_eq!(select(&map(), "2nd"), Ok(String::from("2nd")));
+    fn an_answer_that_names_no_row_is_refused() {
+        assert!(select(&map(), "somewhere-else").is_err());
+        assert!(select(&map(), "2nd").is_err());
+        assert!(select(&map(), "").is_err());
+        // Numbered in ASCII, answered in ASCII: neither a signed number nor another script's
+        // digits picks a row
+        assert!(select(&map(), "+2").is_err());
+        assert!(select(&map(), "\u{0662}").is_err());
+    }
+
+    /// The user is asked again rather than having the answer sent for them.
+    #[test]
+    fn an_answer_that_names_no_row_asks_again() {
+        let server = Stub {
+            prompts: RefCell::new(vec![Prompt {
+                map: Some(map()),
+                ..prompt("Choose person from list", true)
+            }]),
+            ..Stub::default()
+        };
+        let command = Command {
+            prompt_func: true,
+            ..command(vec![])
+        };
+        let (gathered, user) = gather(&server, &command, &[], &["Ada Lovelace", "2"]);
+        assert_eq!(gathered.unwrap(), ["value2"]);
+        assert_eq!(user.questions().len(), 2, "the question was not put again");
     }
 
     #[test]
     fn a_number_outside_the_list_is_refused_rather_than_clamped() {
         assert!(select(&map(), "0").is_err());
         assert!(select(&map(), "4").is_err());
+    }
+
+    /// `raw` means the server parses the selection itself, so the client must not read the list
+    /// on its behalf — that is how `misc print_passwords` prints more than one sheet at a time.
+    #[test]
+    fn an_answer_to_a_raw_list_is_sent_exactly_as_typed() {
+        for answer in ["2", "1-3", "1,3", "3-15", "whatever"] {
+            let server = Stub {
+                prompts: RefCell::new(vec![Prompt {
+                    map: Some(PromptMap {
+                        raw: true,
+                        ..map()
+                    }),
+                    ..prompt("Choose user(s)", true)
+                }]),
+                ..Stub::default()
+            };
+            let command = Command {
+                prompt_func: true,
+                ..command(vec![])
+            };
+            let (gathered, _) = gather(&server, &command, &[], &[answer]);
+            assert_eq!(gathered.unwrap(), [answer], "answered {answer:?}");
+        }
     }
 
     #[test]

@@ -128,15 +128,20 @@ pub struct PromptMap {
     pub header: String,
     /// The rows the user picks from, in the order the server sent them.
     pub options: Vec<PromptOption>,
+    /// Whether the list is only there to be read.
+    ///
+    /// The server's `raw` flag. When it is set, the rows are shown to the user and the answer is
+    /// sent on exactly as it was typed, because the server parses the selection itself — which is
+    /// how it accepts things no single row stands for, such as `1,3` or `3-15`. Leave
+    /// [`Self::options`] alone in that case: their [`PromptOption::value`]s are not what to send.
+    pub raw: bool,
 }
 
 /// One row of a [`PromptMap`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptOption {
-    /// What to send back to the server when this row is picked.
-    ///
-    /// Either the value the server mapped the row to, or the row's position in the list when the
-    /// server set `raw`; which of the two it is has already been decided here.
+    /// What to send back to the server when this row is picked, unless the map is
+    /// [`PromptMap::raw`].
     pub value: String,
     /// What to show the user, with the row's format suggestion already applied.
     pub label: String,
@@ -219,8 +224,6 @@ fn parse_prompt(response: &Value) -> Prompt {
         last_arg: as_bool(strct.get("last_arg")),
         default: as_optional_string(strct.get("default")),
         map: match strct.get("map") {
-            // `raw` decides here whether a row stands for its own position or for the value the
-            // server mapped it to, so that the client only ever has one kind of answer to send
             Some(Value::Array(rows)) => parse_prompt_map(rows, as_bool(strct.get("raw"))),
             _ => None,
         },
@@ -237,17 +240,13 @@ fn parse_prompt_map(rows: &[Value], raw: bool) -> Option<PromptMap> {
         // picks from still line up with the rows the server sent
         options: rows
             .iter()
-            .enumerate()
-            .map(|(index, row)| PromptOption {
-                value: if raw {
-                    (index + 1).to_string()
-                } else {
-                    as_optional_string(row.as_array().and_then(|row| row.get(1)))
-                        .unwrap_or_default()
-                },
+            .map(|row| PromptOption {
+                value: as_optional_string(row.as_array().and_then(|row| row.get(1)))
+                    .unwrap_or_default(),
                 label: render_map_row(row).unwrap_or_default(),
             })
             .collect(),
+        raw,
     })
 }
 
@@ -673,7 +672,7 @@ impl Drop for Bofh {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Bofh, escape_argument, wash_value};
+    use crate::{Bofh, escape_argument, parse_prompt, wash_value};
     use xmlrpc::Value;
 
     #[test]
@@ -720,6 +719,79 @@ mod tests {
                 .into()
             )
         );
+    }
+
+    /// A `call_prompt_func` response shaped the way `misc print_passwords` sends it.
+    fn prompt_response(raw: bool) -> Value {
+        let row = |format: &str, name: &str, value: Value| {
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::from(format),
+                    Value::from(name),
+                    Value::from("password"),
+                ]),
+                value,
+            ])
+        };
+        let mut strct = vec![
+            ("prompt".to_owned(), Value::from("Choose user(s)")),
+            (
+                "map".to_owned(),
+                // The header carries no value of its own, and the rows below it are numbered
+                // from 1 by the client, not by the server
+                Value::Array(vec![
+                    row("%8s %s", "uname", Value::Nil),
+                    row("%-6s %s", "alice", Value::from(1)),
+                    row("%-6s %s", "bob", Value::from(2)),
+                ]),
+            ),
+            ("last_arg".to_owned(), Value::from(true)),
+        ];
+        if raw {
+            strct.push(("raw".to_owned(), Value::from(true)));
+        }
+        Value::Struct(strct.into_iter().collect())
+    }
+
+    /// Each row is rendered with its own format, and carries the value the server mapped it to —
+    /// never its position, whatever `raw` says. `raw` belongs to the map as a whole, and means
+    /// the answer is the user's to write and the server's to read.
+    #[test]
+    fn a_prompt_map_keeps_the_values_the_server_sent() {
+        for raw in [false, true] {
+            let prompt = parse_prompt(&prompt_response(raw));
+            let map = prompt.map.expect("the response has a map");
+
+            assert_eq!(prompt.prompt.as_deref(), Some("Choose user(s)"));
+            assert!(prompt.last_arg);
+            assert_eq!(map.raw, raw);
+            assert_eq!(map.header, "   uname password");
+            assert_eq!(
+                map.options
+                    .iter()
+                    .map(|option| (option.value.as_str(), option.label.as_str()))
+                    .collect::<Vec<(&str, &str)>>(),
+                [("1", "alice  password"), ("2", "bob    password")]
+            );
+        }
+    }
+
+    /// `raw` is absent far more often than it is false, and an absent flag is not a map to read
+    /// the answer against either way.
+    #[test]
+    fn a_prompt_without_a_map_has_none() {
+        let prompt = parse_prompt(&Value::Struct(
+            [
+                ("prompt".to_owned(), Value::from("Enter printer name")),
+                ("default".to_owned(), Value::from("hp-7")),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+
+        assert!(prompt.map.is_none());
+        assert_eq!(prompt.default.as_deref(), Some("hp-7"));
+        assert!(!prompt.last_arg);
     }
 
     /// Escaping an argument and washing it again should get us back what the user typed.
