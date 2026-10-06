@@ -1,11 +1,13 @@
-use bofh::{Bofh, BofhError, CommandGroup};
+use bofh::{Argument, Bofh, BofhError, Command, CommandGroup};
 use clap::Parser;
 mod helper;
 mod internal;
 mod parser;
+mod prompt;
 use crate::helper::BofhHelper;
 use crate::internal::{InternalCommand, Script, Source};
-use crate::parser::split_words;
+use crate::parser::{requote, split_words};
+use crate::prompt::{Ask, PromptError, Terminal, gather_arguments};
 use rpassword::prompt_password;
 use rustyline::{Editor, config::Configurer, error::ReadlineError, history::FileHistory};
 use std::collections::BTreeMap;
@@ -165,6 +167,7 @@ fn repl(
     // since they outlive the command and only the loop sees every line.
     let mut script: Option<Script> = None;
     let mut sources: Vec<Source> = Vec::new();
+    let mut terminal = Terminal;
 
     loop {
         // A sourced line runs as if it had been typed, so it is echoed after the prompt to keep
@@ -195,11 +198,24 @@ fn repl(
         };
 
         let mut failed = words.is_none();
+        // As much of the line as may be remembered, which is all of it unless it holds a password
+        let mut public = line.clone();
 
         if let Some(words) = words {
             let helper = rl.helper().expect("Failed to get rustyline helper");
             let completed = match resolve_command(helper, &words) {
-                Ok(resolved) => resolved.run(bofh, helper, user, &mut script)?,
+                Ok(resolved) => {
+                    let kept = resolved.public_words(words.len());
+                    if kept < words.len() {
+                        public = requote(&words[..kept]);
+                    }
+                    // Nobody is watching a sourced line, so there is nobody to prompt either
+                    let ask: Option<&mut dyn Ask> = match line_number {
+                        Some(_) => None,
+                        None => Some(&mut terminal),
+                    };
+                    resolved.run(bofh, helper, user, &mut script, ask)?
+                }
                 Err(message) => Outcome::Failed(message).into(),
             };
 
@@ -240,7 +256,7 @@ fn repl(
             Some(number) if failed => abort_source(&mut sources, number),
             Some(_) => (),
             None => {
-                if let Err(err) = rl.add_history_entry(&line) {
+                if let Err(err) = rl.add_history_entry(&public) {
                     eprintln!("Unable to save command to history: {err:?}");
                 }
             }
@@ -332,8 +348,8 @@ struct Resolved<'a> {
 enum Target {
     /// In the client itself.
     Internal(&'static InternalCommand),
-    /// On the server, under this full bofhd command name, eg. `user_info`.
-    Server(String),
+    /// On the server, as this bofhd command.
+    Server(Command),
 }
 
 impl Resolved<'_> {
@@ -349,13 +365,35 @@ impl Resolved<'_> {
         helper: &BofhHelper,
         user: &str,
         script: &mut Option<Script>,
+        ask: Option<&mut (dyn Ask + '_)>,
     ) -> Result<Completed, Box<dyn Error>> {
         match self.target {
             Target::Internal(command) => {
                 Ok(internal::run(command, &self.args, bofh, helper, script).into())
             }
-            Target::Server(command) => run_command(bofh, user, &command, &self.args),
+            Target::Server(command) => run_command(bofh, user, &command, &self.args, ask),
         }
+    }
+
+    /// How many of the line's `words` may be written to the history file.
+    ///
+    /// Three `UiO` commands take a password as an ordinary argument, so a user who types the whole
+    /// command line hands us a cleartext password to remember. The line is kept only up to that
+    /// argument: recalling it and pressing enter then asks for the password instead of repeating
+    /// it, which is a better answer than either storing it or forgetting the command.
+    ///
+    /// Neither pybofh nor jbofh has this problem, since both always prompt — and neither keeps a
+    /// history file across sessions at all.
+    fn public_words(&self, words: usize) -> usize {
+        let Target::Server(command) = &self.target else {
+            return words;
+        };
+        let Some(position) = command.args.iter().position(Argument::is_password) else {
+            return words;
+        };
+
+        // Whatever the line has before its arguments is the command's own name
+        (words - self.args.len() + position).min(words)
     }
 }
 
@@ -405,7 +443,6 @@ fn resolve_command<'a>(helper: &BofhHelper, words: &'a [String]) -> Result<Resol
                 .commands
                 .get(subcommand)
                 .expect("Failed to retrieve subcommand (this shouldn't be possible)")
-                .fullname
                 .clone(),
         ),
         args: arguments(2),
@@ -421,11 +458,12 @@ fn resolve_command<'a>(helper: &BofhHelper, words: &'a [String]) -> Result<Resol
 fn run_command(
     bofh: &mut Bofh,
     user: &str,
-    command: &str,
-    args: &[&str],
+    command: &Command,
+    given: &[&str],
+    mut ask: Option<&mut (dyn Ask + '_)>,
 ) -> Result<Completed, Box<dyn Error>> {
-    let error = match bofh.run_command(command, args) {
-        Ok(output) => return Ok(Outcome::Output(output).into()),
+    let error = match attempt(bofh, command, given, ask.as_deref_mut()) {
+        Ok(outcome) => return Ok(outcome.into()),
         Err(error) => error,
     };
 
@@ -441,14 +479,44 @@ fn run_command(
         error => return Ok(Outcome::Failed(error.to_string()).into()),
     };
 
-    // Re-run the command, now that the session works again
+    // Re-run the command, now that the session works again. Anything the user was prompted for
+    // is asked again: the server drives the questions, so there is no way to resume a half-asked
+    // command against a session that no longer exists.
     Ok(Completed {
-        outcome: match bofh.run_command(command, args) {
-            Ok(output) => Outcome::Output(output),
+        outcome: match attempt(bofh, command, given, ask) {
+            Ok(outcome) => outcome,
             Err(error) => Outcome::Failed(error.to_string()),
         },
         commands: Some(commands),
     })
+}
+
+/// Ask for whatever arguments the line left out, then run the command with them.
+///
+/// The `Err` is only for the two errors the caller can do something about by re-establishing the
+/// session; anything else is a message for the user, and so an [`Outcome::Failed`].
+fn attempt(
+    bofh: &mut Bofh,
+    command: &Command,
+    given: &[&str],
+    ask: Option<&mut (dyn Ask + '_)>,
+) -> Result<Outcome, BofhError> {
+    let args = match gather_arguments(bofh, command, given, ask) {
+        Ok(args) => args,
+        Err(PromptError::Bofh(
+            error @ (BofhError::ServerRestartedError | BofhError::SessionExpiredError),
+        )) => return Err(error),
+        Err(error) => return Ok(Outcome::Failed(error.to_string())),
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    match bofh.run_command(&command.fullname, &args) {
+        Ok(output) => Ok(Outcome::Output(output)),
+        Err(error @ (BofhError::ServerRestartedError | BofhError::SessionExpiredError)) => {
+            Err(error)
+        }
+        Err(error) => Ok(Outcome::Failed(error.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -467,7 +535,7 @@ mod tests {
         Ok((
             match target {
                 Target::Internal(command) => command.name.to_owned(),
-                Target::Server(command) => command,
+                Target::Server(command) => command.fullname,
             },
             args,
         ))

@@ -47,7 +47,13 @@ pub struct Command {
     /// The name of this subcommand.
     pub name: String,
     /// Valid arguments to this command.
+    ///
+    /// Empty when [`Self::prompt_func`] is set: the server describes those arguments one at a
+    /// time as they are asked for, rather than up front.
     pub args: Vec<Argument>,
+    /// Whether the server asks for this command's arguments itself, through
+    /// [`Bofh::call_prompt_func`], instead of advertising them in [`Self::args`].
+    pub prompt_func: bool,
     /// Help text for command, supplied by the server.
     pub help: Option<String>,
 }
@@ -59,8 +65,8 @@ pub struct Argument {
     pub optional: bool,
     /// Whether this argument can be repeated.
     pub repeat: bool,
-    /// The default value for this argument.
-    pub default: Option<String>,
+    /// The default value for this argument, if it has one.
+    pub default: Option<ArgDefault>,
     /// The argument type.
     pub arg_type: Option<String>,
     /// The help reference that should be used for this argument, if the client requests help.
@@ -69,8 +75,72 @@ pub struct Argument {
     pub prompt: Option<String>,
 }
 
-#[derive(Debug)]
-enum ArgType {}
+/// The argument type that means the client must not echo what the user types.
+///
+/// Of the 54 argument types stock Cerebrum declares, it is the only one that carries any
+/// behaviour, and every client implements just this one (`readlineui.py:198`, `JBofh.java:505`).
+/// So the type stays an open [`String`] rather than an enum that would have to guess at the rest,
+/// including whatever a site-local bofhd module adds.
+const PASSWORD_ARG_TYPE: &str = "accountPassword";
+
+impl Argument {
+    /// Whether this argument is a password, and so must not be echoed or kept in the history.
+    #[must_use]
+    pub fn is_password(&self) -> bool {
+        self.arg_type.as_deref() == Some(PASSWORD_ARG_TYPE)
+    }
+}
+
+/// The default value for an [`Argument`], which the server either sends or promises to compute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgDefault {
+    /// The default itself, sent along with the command table.
+    Value(String),
+    /// `Parameter.get_struct` sends the *integer* `1` in place of any default that isn't text,
+    /// meaning the client should ask [`Bofh::get_default_param`] for the real one
+    /// (`cmd_param.py:79-87`).
+    FromServer,
+}
+
+/// What a command whose arguments are driven by the server wants asked next.
+///
+/// Returned by [`Bofh::call_prompt_func`]. The client asks the question, appends the answer to
+/// the arguments it already has, and calls again until [`Self::last_arg`] says to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    /// The question to put to the user. `None` together with [`Self::last_arg`] means the server
+    /// has nothing left to ask and the command should be run with the arguments gathered so far.
+    pub prompt: Option<String>,
+    /// What to pass to [`Bofh::help_argument`] if the user asks what the argument means.
+    pub help_ref: Option<String>,
+    /// Whether the answer to this question is the command's last argument.
+    pub last_arg: bool,
+    /// The value to use if the user answers with an empty line.
+    pub default: Option<String>,
+    /// A list to pick the answer from, if the server offered one.
+    pub map: Option<PromptMap>,
+}
+
+/// A list of answers a [`Prompt`] offers to choose from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptMap {
+    /// The first row of the server's map, which labels the ones below it.
+    pub header: String,
+    /// The rows the user picks from, in the order the server sent them.
+    pub options: Vec<PromptOption>,
+}
+
+/// One row of a [`PromptMap`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptOption {
+    /// What to send back to the server when this row is picked.
+    ///
+    /// Either the value the server mapped the row to, or the row's position in the list when the
+    /// server set `raw`; which of the two it is has already been decided here.
+    pub value: String,
+    /// What to show the user, with the row's format suggestion already applied.
+    pub label: String,
+}
 
 /// Decode bofhd's encoding of values that XML-RPC can't express by itself.
 ///
@@ -101,6 +171,28 @@ fn wash_value(value: Value) -> Value {
     }
 }
 
+/// Read a flag the way bofhd sends them, which is not always as a boolean.
+///
+/// `cmd_param` hands some flags to the XML-RPC layer as the *text* Python's `str()` makes of a
+/// bool, so `"True"` has to mean the same as `true`; see `BOFH-BUGS.md`. A missing key is false,
+/// which is how bofhd omits the flags it hasn't set.
+fn as_bool(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => value == "True",
+        Some(Value::Int(value)) => *value != 0,
+        _ => false,
+    }
+}
+
+/// Read a value that the server may have left out or sent as nil.
+fn as_optional_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Nil) => None,
+        Some(value) => Some(formatting::render_value(value)),
+    }
+}
+
 /// Escape an argument that starts with a colon, which bofhd would otherwise strip.
 ///
 /// This is the inverse of the escaping [`wash_value`] undoes.
@@ -110,6 +202,66 @@ fn escape_argument(argument: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(argument)
     }
+}
+
+/// Read the struct that `call_prompt_func` answers with.
+///
+/// The map is flattened here rather than in the client: applying a row's printf format is the
+/// same job the library already does for format suggestions, and it is what keeps
+/// [`xmlrpc::Value`] out of the public API.
+fn parse_prompt(response: &Value) -> Prompt {
+    let empty = BTreeMap::new();
+    let strct = response.as_struct().unwrap_or(&empty);
+
+    Prompt {
+        prompt: as_optional_string(strct.get("prompt")),
+        help_ref: as_optional_string(strct.get("help_ref")),
+        last_arg: as_bool(strct.get("last_arg")),
+        default: as_optional_string(strct.get("default")),
+        map: match strct.get("map") {
+            // `raw` decides here whether a row stands for its own position or for the value the
+            // server mapped it to, so that the client only ever has one kind of answer to send
+            Some(Value::Array(rows)) => parse_prompt_map(rows, as_bool(strct.get("raw"))),
+            _ => None,
+        },
+    }
+}
+
+/// Flatten the rows of a prompt's map, the first of which is the header for the rest.
+fn parse_prompt_map(rows: &[Value], raw: bool) -> Option<PromptMap> {
+    let (header, rows) = rows.split_first()?;
+
+    Some(PromptMap {
+        header: render_map_row(header).unwrap_or_default(),
+        // A row that can't be read keeps its place in the list, so that the numbers the user
+        // picks from still line up with the rows the server sent
+        options: rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| PromptOption {
+                value: if raw {
+                    (index + 1).to_string()
+                } else {
+                    as_optional_string(row.as_array().and_then(|row| row.get(1)))
+                        .unwrap_or_default()
+                },
+                label: render_map_row(row).unwrap_or_default(),
+            })
+            .collect(),
+    })
+}
+
+/// Render one row of a map, which pairs a printf format with the values to interpolate into it.
+fn render_map_row(row: &Value) -> Option<String> {
+    let (format, values) = row.as_array()?.first()?.as_array()?.split_first()?;
+    let format = format.as_str()?;
+
+    if !format.contains('%') {
+        return Some(format.to_owned());
+    }
+    let values: Vec<String> = values.iter().map(formatting::render_value).collect();
+    // A format we can't reproduce is shown as it came rather than guessed at, as elsewhere
+    Some(formatting::apply_format(format, &values).unwrap_or_else(|| format.to_owned()))
 }
 
 /// A bofhd command group, ie. semantically linked command prefixes.
@@ -259,49 +411,39 @@ impl Bofh {
                 Command {
                     name: array[0].as_array().unwrap()[1].as_str().unwrap().into(),
                     fullname: cmd.into(),
-                    args: match &array[1] {
-                        Value::Array(array) => {
+                    // A command with no parameters and no prompt func is sent as a one-element
+                    // array, so the arguments have to be asked for rather than indexed:
+                    // `misc reload` is one, and it is superuser-only, which is why this went
+                    // unnoticed (`cmd_param.py:287-289`)
+                    args: match array.get(1) {
+                        Some(Value::Array(array)) => {
                             let mut vector = vec![];
                             for strct in array {
                                 let strct = strct.as_struct().unwrap();
                                 vector.push(Argument {
-                                    optional: match strct
-                                        .get("optional")
-                                        .or(Some(&Value::Bool(false)))
-                                    {
-                                        Some(Value::Bool(value)) => *value,
+                                    optional: as_bool(strct.get("optional")),
+                                    repeat: as_bool(strct.get("repeat")),
+                                    default: match strct.get("default") {
+                                        None | Some(Value::Nil) => None,
+                                        // Anything that isn't text is the sentinel, whatever
+                                        // number the server chose to spell it with
                                         Some(Value::String(value)) => {
-                                            matches!(value.as_str(), "True")
+                                            Some(ArgDefault::Value(value.clone()))
                                         }
-                                        _ => false,
+                                        Some(_) => Some(ArgDefault::FromServer),
                                     },
-                                    repeat: match strct.get("repeat").or(Some(&Value::Bool(false)))
-                                    {
-                                        Some(Value::Bool(value)) => *value,
-                                        Some(Value::String(value)) => {
-                                            matches!(value.as_str(), "True")
-                                        }
-                                        _ => false,
-                                    },
-                                    default: strct
-                                        .get("default")
-                                        .map(|x| x.as_str().unwrap().to_owned()),
-                                    arg_type: strct
-                                        .get("type")
-                                        .map(|x| x.as_str().unwrap().to_owned()),
-                                    help_ref: strct
-                                        .get("help_ref")
-                                        .map(|x| x.as_str().unwrap().to_owned()),
-                                    prompt: strct
-                                        .get("prompt")
-                                        .map(|x| x.as_str().unwrap().to_owned()),
+                                    arg_type: as_optional_string(strct.get("type")),
+                                    help_ref: as_optional_string(strct.get("help_ref")),
+                                    prompt: as_optional_string(strct.get("prompt")),
                                 });
                             }
                             vector
                         }
-                        Value::String(_) => vec![Argument::default()], // prompt_func
+                        // The literal string `"prompt_func"`: the server will ask for the
+                        // arguments itself, so there are none to list here
                         _ => vec![],
                     },
+                    prompt_func: matches!(array.get(1), Some(Value::String(_))),
                     help: None,
                 },
             );
@@ -333,6 +475,51 @@ impl Bofh {
             Some(suggestion) => suggestion.format(&response),
             None => formatting::render_plain(&response),
         })
+    }
+
+    /// Ask the server what to prompt for next, for a command that gathers its own arguments.
+    ///
+    /// A command whose [`Command::prompt_func`] is set doesn't advertise its arguments; instead
+    /// the client asks one question at a time, appending each answer to `args` and calling again
+    /// until the returned [`Prompt::last_arg`] says to stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason, including a
+    /// [`BofhError::CerebrumError`] if the command has no prompt function, or if the answers so
+    /// far don't make sense to it.
+    pub fn call_prompt_func(&self, command: &str, args: &[&str]) -> Result<Prompt, BofhError> {
+        let mut call = vec![command];
+        call.extend_from_slice(args);
+        Ok(parse_prompt(&self.run_raw_sess_command(
+            "call_prompt_func",
+            &call,
+        )?))
+    }
+
+    /// Ask the server to compute the default value for the next argument of a command.
+    ///
+    /// Only needed for an [`Argument`] whose default is [`ArgDefault::FromServer`]; `args` is
+    /// what the user has answered so far, which is also how the server knows which argument is
+    /// being asked about (`handler.py:644` indexes the parameter list by their number).
+    ///
+    /// Returns `None` when the server has no default to offer, which it says with an empty
+    /// string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BofhError`] if the command fails for some reason.
+    pub fn get_default_param(
+        &self,
+        command: &str,
+        args: &[&str],
+    ) -> Result<Option<String>, BofhError> {
+        let mut call = vec![command];
+        call.extend_from_slice(args);
+        Ok(as_optional_string(Some(
+            &self.run_raw_sess_command("get_default_param", &call)?,
+        ))
+        .filter(|default| !default.is_empty()))
     }
 
     /// Return the format suggestion for a command, fetching it the first time it's needed.

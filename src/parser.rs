@@ -56,9 +56,31 @@ pub(crate) fn split_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
+/// Join words back into a command line that [`split_words`] would split the same way again.
+///
+/// Used when only part of a line may be kept, so that what is kept is still a line the user can
+/// recall and run. Everything that isn't plain gets quoted, whether or not it had to be: this is
+/// a line to be read back by the lexer, not a reconstruction of what was typed.
+pub(crate) fn requote(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| {
+            if !word.is_empty()
+                && !word
+                    .chars()
+                    .any(|char| char.is_whitespace() || char == '"' || char == '\\')
+            {
+                return word.clone();
+            }
+            format!(r#""{}""#, word.replace('\\', r"\\").replace('"', r#"\""#))
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split_words;
+    use super::{requote, split_words};
 
     fn words(line: &str) -> Vec<String> {
         split_words(line).unwrap()
@@ -89,6 +111,26 @@ mod tests {
         assert_eq!(words(r#""foo\"bar""#), [r#"foo"bar"#]);
         // A backslash escapes whitespace even inside quotes, where it isn't needed
         assert_eq!(words(r#""foo\ bar""#), ["foo bar"]);
+    }
+
+    #[test]
+    fn requoting_words_gives_a_line_that_lexes_back_into_them() {
+        for line in [
+            "user info foo",
+            r#"user info "foo bar""#,
+            r#"user info "foo\"bar""#,
+            r#"user info "foo\\bar""#,
+            r#"a "" b"#,
+        ] {
+            let lexed = words(line);
+            assert_eq!(words(&requote(&lexed)), lexed, "{line}");
+        }
+    }
+
+    #[test]
+    fn requoting_leaves_ordinary_words_alone() {
+        assert_eq!(requote(&words("user info foo")), "user info foo");
+        assert_eq!(requote(&words(r#""foo"bar"#)), "foobar");
     }
 
     #[test]

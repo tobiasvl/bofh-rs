@@ -188,7 +188,7 @@ pub fn render_plain(response: &Value) -> String {
 }
 
 /// Render a single field value for interpolation into a format suggestion.
-fn render_value(value: &Value) -> String {
+pub(crate) fn render_value(value: &Value) -> String {
     match value {
         Value::Nil => String::from("<not set>"),
         Value::String(string) => string.clone(),
@@ -235,7 +235,7 @@ fn format_datetime(datetime: iso8601::DateTime, pattern: &str) -> String {
 ///
 /// Returns `None` for anything outside that grammar, or if the suggestion asks for more values than
 /// the entry has, so the caller can fall back.
-fn apply_format(format: &str, values: &[String]) -> Option<String> {
+pub(crate) fn apply_format(format: &str, values: &[String]) -> Option<String> {
     let mut formatted = String::with_capacity(format.len());
     let mut values = values.iter();
     let mut chars = format.chars().peekable();

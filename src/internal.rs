@@ -109,6 +109,10 @@ fn commands(helper: &BofhHelper) -> String {
     for group in helper.commands.values() {
         for command in group.commands.values() {
             let mut line = format!("{} {}", group.name, command.name);
+            if command.prompt_func {
+                // The server hasn't said what these are; it asks for them one at a time
+                line.push_str(" <prompted by the server>");
+            }
             for argument in &command.args {
                 // The type is what the hinter shows as well
                 let name = argument
@@ -312,6 +316,8 @@ pub(crate) mod tests {
             ),
             ("set_spread", vec![argument("spread", false, true)]),
             ("nameless", vec![Argument::default()]),
+            // The server asks for this one's arguments itself, so it advertises none
+            ("create", vec![]),
         ];
 
         BofhHelper {
@@ -328,6 +334,7 @@ pub(crate) mod tests {
                                     fullname: format!("user_{name}"),
                                     name: name.to_owned(),
                                     args,
+                                    prompt_func: name == "create",
                                     help: None,
                                 },
                             )
@@ -351,10 +358,12 @@ pub(crate) mod tests {
     fn commands_are_listed_as_they_would_be_typed() {
         // Not as a dump of the client's own command table, which is what the other two clients do
         let listing = commands(&helper());
-        let listed: Vec<&str> = listing.lines().take(4).collect();
+        let listed: Vec<&str> = listing.lines().take(5).collect();
         assert_eq!(
             listed,
             [
+                // A command whose arguments the server asks for itself has none to list
+                "user create <prompted by the server>",
                 "user info <accountName>",
                 // An argument with no type at all still has to be shown as taking something
                 "user nameless <argument>",

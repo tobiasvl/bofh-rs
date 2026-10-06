@@ -353,6 +353,7 @@ pub(crate) mod tests {
                                     fullname: format!("{group}_{name}"),
                                     name: name.to_owned(),
                                     args: vec![],
+                                    prompt_func: false,
                                     help: None,
                                 },
                             )
