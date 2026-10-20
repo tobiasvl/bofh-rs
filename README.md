@@ -6,7 +6,7 @@ This is a Rust implementation of `bofh` (_BrukerOrganisering For Hvermansen_), a
 Requirements
 ------------
 
-Make sure you have the development packages of openssl installed. For example, `libssl-dev` on Ubuntu or `openssl-devel` on Fedora.
+Make sure you have the `openssl` installed.
 
 Features
 --------

@@ -3,6 +3,7 @@ name = "bofh"
 version = "0.0.11"
 authors = ["Tobias V. Langhoff"]
 edition = "2024"
+rust-version = "1.88"
 description = "Command-line client for the Cerebrum IGA"
 license = "MIT"
 repository = "https://github.com/tobiasvl/bofh-rs"
@@ -10,8 +11,9 @@ documentation = "https://docs.rs/bofh"
 categories = ["api-bindings", "command-line-utilities"]
 
 [dependencies]
-xmlrpc = "0.15"
-iso8601 = "0.4" # Used in xmlrpc Values
+dxr = { version = "0.9", features = ["nil", "i8"] }
+dxr_client = { version = "0.9", default-features = false }
+ureq = "3"
 thiserror = "2.0"
 rustyline = "18"
 rustyline-derive = "0.12"
