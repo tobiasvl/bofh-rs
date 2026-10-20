@@ -558,6 +558,26 @@ mod tests {
         );
     }
 
+    /// The command name is the server's and is matched whatever case it was typed in; the
+    /// arguments are the user's and are passed on exactly as they were written.
+    #[test]
+    fn a_command_folds_case_but_its_arguments_do_not() {
+        assert_eq!(
+            resolve(&words("USER INFO Foo.Bar")),
+            Ok((String::from("user_info"), vec!["Foo.Bar"]))
+        );
+        assert_eq!(
+            resolve(&words("User Info HUNTER2")),
+            Ok((String::from("user_info"), vec!["HUNTER2"]))
+        );
+        // Internal commands share the namespace, so they fold too
+        assert_eq!(resolve(&words("QUIT")), Ok((String::from("quit"), vec![])));
+        assert_eq!(
+            resolve(&words("Help User Info")),
+            Ok((String::from("help"), vec!["User", "Info"]))
+        );
+    }
+
     /// An internal command is one word and a bofhd command is two, which is exactly why the
     /// arguments are gathered during resolution rather than counted by the caller afterwards.
     #[test]

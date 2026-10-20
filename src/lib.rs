@@ -583,10 +583,9 @@ impl Bofh {
     pub fn call_prompt_func(&self, command: &str, args: &[&str]) -> Result<Prompt, BofhError> {
         let mut call = vec![command];
         call.extend_from_slice(args);
-        Ok(parse_prompt(&self.run_raw_sess_command(
-            "call_prompt_func",
-            &call,
-        )?))
+        Ok(parse_prompt(
+            &self.run_raw_sess_command("call_prompt_func", &call)?,
+        ))
     }
 
     /// Ask the server to compute the default value for the next argument of a command.
@@ -743,9 +742,11 @@ impl Bofh {
     ///
     /// Will normally never panic, unless the Message of the Day returned by the bofhd server is in an invalid format.
     pub fn get_motd(&self, client_id: &str, client_version: &str) -> Result<String, BofhError> {
-        Ok(as_str(&self.run_raw_command("get_motd", &[client_id, client_version])?)
-            .expect("Invalid bofhd response")
-            .to_owned())
+        Ok(
+            as_str(&self.run_raw_command("get_motd", &[client_id, client_version])?)
+                .expect("Invalid bofhd response")
+                .to_owned(),
+        )
     }
 }
 
@@ -800,10 +801,7 @@ mod tests {
             wash_value(Value::Struct(
                 [
                     ("expire_date".to_owned(), text(":None")),
-                    (
-                        "affiliations".to_owned(),
-                        Value::Array(vec![text(":None")])
-                    ),
+                    ("affiliations".to_owned(), Value::Array(vec![text(":None")])),
                 ]
                 .into()
             )),
@@ -821,11 +819,7 @@ mod tests {
     fn prompt_response(raw: bool) -> Value {
         let row = |format: &str, name: &str, value: Value| {
             Value::Array(vec![
-                Value::Array(vec![
-                    text(format),
-                    text(name),
-                    text("password"),
-                ]),
+                Value::Array(vec![text(format), text(name), text("password")]),
                 value,
             ])
         };

@@ -16,11 +16,21 @@ pub(crate) struct BofhHelper {
     pub(crate) commands: BTreeMap<String, bofh::CommandGroup>,
 }
 
+/// Whether `command` begins with `prefix`, whatever case either was typed in.
+fn starts_with_ignoring_case(command: &str, prefix: &str) -> bool {
+    command
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
 /// Resolve `word` to itself or any candidates it is a prefix of.
 fn resolve<'a>(candidates: &[&'a str], word: &str) -> Option<&'a str> {
     match candidates {
         [command] => Some(command),
-        candidates => candidates.iter().find(|&&command| command == word).copied(),
+        candidates => candidates
+            .iter()
+            .find(|&&command| command.eq_ignore_ascii_case(word))
+            .copied(),
     }
 }
 
@@ -43,7 +53,7 @@ impl BofhHelper {
             .iter()
             .map(|command| command.name)
             .chain(self.commands.keys().map(String::as_str))
-            .filter(|command| command.starts_with(prefix))
+            .filter(|command| starts_with_ignoring_case(command, prefix))
             .collect();
         candidates.sort_unstable();
         candidates
@@ -69,13 +79,14 @@ impl BofhHelper {
         resolve(&candidates, word).ok_or_else(|| ambiguity(&candidates, &format!("{group} {word}")))
     }
 
+    /// Every subcommand of `command` that starts with `prefix`.
     pub(crate) fn subcommand_candidates(&self, command: &str, prefix: &str) -> Vec<&str> {
         if let Some(command) = self.commands.get(command) {
             command
                 .commands
                 .keys()
                 .filter_map(|command| {
-                    if command.starts_with(prefix) {
+                    if starts_with_ignoring_case(command, prefix) {
                         Some(command.as_str())
                     } else {
                         None
@@ -239,7 +250,7 @@ impl Completer for BofhHelper {
         };
 
         Ok((
-            pos,
+            pos - word_pos,
             candidates
                 .iter()
                 .map(|&candidate| Pair {
@@ -251,9 +262,9 @@ impl Completer for BofhHelper {
                         candidate[word_pos..].bright_green().bold()
                     ),
                     replacement: if candidates.len() == 1 {
-                        format!("{} ", &candidate[word_pos..])
+                        format!("{candidate} ")
                     } else {
-                        candidate[word_pos..].to_owned()
+                        candidate.to_owned()
                     },
                 })
                 .collect(),
@@ -417,6 +428,51 @@ pub(crate) mod tests {
             Err(String::from(
                 "Ambiguous command 's', could be: script, source"
             ))
+        );
+    }
+
+    /// Command names are the server's, and it only has lowercase ones, so the case a user holds
+    /// shift for carries nothing worth honouring.
+    #[test]
+    fn a_command_can_be_typed_in_any_case() {
+        assert_eq!(helper().resolve_command_name("USER"), Ok("user"));
+        assert_eq!(helper().resolve_command_name("User"), Ok("user"));
+        assert_eq!(helper().resolve_command_name("Pe"), Ok("person"));
+        assert_eq!(helper().resolve_subcommand_name("user", "I"), Ok("info"));
+        assert_eq!(helper().resolve_subcommand_name("user", "InFo"), Ok("info"));
+        // Case doesn't make an abbreviation any less ambiguous
+        assert_eq!(
+            helper().resolve_command_name("H"),
+            Err(String::from(
+                "Ambiguous command 'H', could be: help, history"
+            ))
+        );
+        // Nor does it reach a command that isn't there
+        assert_eq!(
+            helper().resolve_command_name("ZZZ"),
+            Err(String::from("Unknown command 'ZZZ'"))
+        );
+        // The rule that a word spelled out in full beats the longer commands it prefixes still
+        // holds when it is shouted
+        assert_eq!(helper().resolve_subcommand_name("group", "ADD"), Ok("add"));
+        assert_eq!(helper().command_candidates("GR"), ["group"]);
+    }
+
+    /// A line that will run has to look like it will run, so the colouring folds case too — and
+    /// it still colours the word the user typed, not the command's own spelling.
+    #[test]
+    fn highlighting_recognizes_a_command_in_any_case() {
+        assert_eq!(
+            helper().highlight("USER P", 6),
+            format!(
+                "{} {}",
+                colorize_command(&["user"], "USER"),
+                colorize_command(&["password"], "P")
+            )
+        );
+        assert_eq!(
+            strip_colors(&helper().highlight("User Info foo", 13)),
+            "User Info foo"
         );
     }
 

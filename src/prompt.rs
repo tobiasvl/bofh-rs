@@ -673,10 +673,7 @@ mod tests {
     #[test]
     fn a_prompt_func_command_asks_the_server_what_to_ask_next() {
         let server = Stub {
-            prompts: RefCell::new(vec![
-                prompt("Account", false),
-                prompt("Group", true),
-            ]),
+            prompts: RefCell::new(vec![prompt("Account", false), prompt("Group", true)]),
             ..Stub::default()
         };
         let command = Command {
@@ -799,10 +796,7 @@ mod tests {
         for answer in ["2", "1-3", "1,3", "3-15", "whatever"] {
             let server = Stub {
                 prompts: RefCell::new(vec![Prompt {
-                    map: Some(PromptMap {
-                        raw: true,
-                        ..map()
-                    }),
+                    map: Some(PromptMap { raw: true, ..map() }),
                     ..prompt("Choose user(s)", true)
                 }]),
                 ..Stub::default()

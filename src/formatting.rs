@@ -122,7 +122,10 @@ impl FormatSuggestion {
     #[must_use]
     pub fn parse(suggestion: &Value) -> Option<Self> {
         let suggestion = as_struct(suggestion)?;
-        let header = suggestion.get("hdr").and_then(as_str).map(ToOwned::to_owned);
+        let header = suggestion
+            .get("hdr")
+            .and_then(as_str)
+            .map(ToOwned::to_owned);
 
         let items = match suggestion.get("str_vars")? {
             // A bare string is printed as-is, with nothing interpolated into it
@@ -395,10 +398,7 @@ mod tests {
     #[test]
     fn strings_in_a_response_are_passed_through() {
         let suggestion = suggestion(None, one_row("a=%s", &["a"]));
-        let response = Value::Array(vec![
-            entry(&[("a", text("1"))]),
-            text("a plain message"),
-        ]);
+        let response = Value::Array(vec![entry(&[("a", text("1"))]), text("a plain message")]);
         assert_eq!(suggestion.format(&response), "a=1\na plain message");
     }
 
@@ -470,7 +470,10 @@ mod tests {
         // like this can only come from a future server. We drop the entry, as the server's own
         // reference spec does; pybofh raises instead and loses the whole response.
         let suggestion = suggestion(None, one_row("%s", &["cost:money:NOK"]));
-        assert_eq!(suggestion.format(&entry(&[("cost", Value::Integer(10))])), "");
+        assert_eq!(
+            suggestion.format(&entry(&[("cost", Value::Integer(10))])),
+            ""
+        );
     }
 
     #[test]
