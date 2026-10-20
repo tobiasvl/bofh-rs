@@ -4,8 +4,9 @@
 //! (handled by [`render_plain`]) or it returns a struct (or a list of structs) together with
 //! a suggestion on how to format it (handled by [`FormatSuggestion::format`]).
 
+use crate::{as_array, as_str, as_struct, field};
+use dxr::{DateTime, Value};
 use std::fmt::Write as _;
-use xmlrpc::Value;
 
 /// How a field value should be rendered, from the `<name>:<type>:<params>` field reference syntax.
 ///
@@ -44,7 +45,7 @@ impl FieldRef {
 
     /// Render this field of `entry`, or `None` if the entry doesn't have it.
     fn render(&self, entry: &Value) -> Option<String> {
-        let value = entry.get(self.name.as_str())?;
+        let value = field(entry, &self.name)?;
         Some(match (&self.field_type, value) {
             (Some(FieldType::Date(pattern)), Value::DateTime(datetime)) => {
                 format_datetime(*datetime, pattern)
@@ -66,18 +67,17 @@ struct FormatItem {
 impl FormatItem {
     /// Parse one `(format, fields)` or `(format, fields, header)` row of `str_vars`.
     fn parse(row: &Value) -> Option<Self> {
-        let row = row.as_array()?;
-        let mut format = row.first()?.as_str()?.to_owned();
+        let row = as_array(row)?;
+        let mut format = as_str(row.first()?)?.to_owned();
         let fields = match row.get(1) {
             // The field list is allowed to be absent or nil, for a row with no interpolation
             None | Some(Value::Nil) => Vec::new(),
-            Some(fields) => fields
-                .as_array()?
+            Some(fields) => as_array(fields)?
                 .iter()
-                .map(|field| Some(FieldRef::parse(field.as_str()?)))
+                .map(|field| Some(FieldRef::parse(as_str(field)?)))
                 .collect::<Option<_>>()?,
         };
-        let mut header = row.get(2).and_then(Value::as_str).map(ToOwned::to_owned);
+        let mut header = row.get(2).and_then(as_str).map(ToOwned::to_owned);
 
         // TODO: Apparently, some format suggestions in the past have swapped the header and the format
         // string. This code will probably never execute, but pybofh and jbofh does the same check
@@ -121,11 +121,8 @@ impl FormatSuggestion {
     /// [`render_plain`] rather than show the user nothing.
     #[must_use]
     pub fn parse(suggestion: &Value) -> Option<Self> {
-        let suggestion = suggestion.as_struct()?;
-        let header = suggestion
-            .get("hdr")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+        let suggestion = as_struct(suggestion)?;
+        let header = suggestion.get("hdr").and_then(as_str).map(ToOwned::to_owned);
 
         let items = match suggestion.get("str_vars")? {
             // A bare string is printed as-is, with nothing interpolated into it
@@ -192,10 +189,10 @@ pub(crate) fn render_value(value: &Value) -> String {
     match value {
         Value::Nil => String::from("<not set>"),
         Value::String(string) => string.clone(),
-        Value::Int(int) => int.to_string(),
-        Value::Int64(int) => int.to_string(),
+        Value::Integer(int) => int.to_string(),
+        Value::Long(int) => int.to_string(),
         Value::Double(double) => double.to_string(),
-        Value::Bool(bool) => bool.to_string(),
+        Value::Boolean(bool) => bool.to_string(),
         Value::DateTime(datetime) => format_datetime(*datetime, "yyyy-MM-dd HH:mm:ss"),
         Value::Base64(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         value => format!("{value:?}"),
@@ -205,23 +202,15 @@ pub(crate) fn render_value(value: &Value) -> String {
 /// Format a date with the subset of [`java.text.SimpleDateFormat`][sdf] that bofhd uses.
 ///
 /// [sdf]: https://docs.oracle.com/javase/8/docs/api/java/text/SimpleDateFormat.html
-fn format_datetime(datetime: iso8601::DateTime, pattern: &str) -> String {
-    let (year, month, day) = match datetime.date {
-        iso8601::Date::YMD { year, month, day } => (year, month, day),
-        // bofhd only ever sends calendar dates, so anything else is rendered as the epoch rather
-        // than by pulling in a full calendar implementation to convert it
-        _ => (0, 0, 0),
-    };
-    let time = datetime.time;
-
+fn format_datetime(datetime: DateTime, pattern: &str) -> String {
     let mut formatted = pattern.to_owned();
     for (from, to) in [
-        ("yyyy", format!("{year:04}")),
-        ("MM", format!("{month:02}")),
-        ("dd", format!("{day:02}")),
-        ("HH", format!("{:02}", time.hour)),
-        ("mm", format!("{:02}", time.minute)),
-        ("ss", format!("{:02}", time.second)),
+        ("yyyy", format!("{:04}", datetime.year())),
+        ("MM", format!("{:02}", datetime.month())),
+        ("dd", format!("{:02}", datetime.day())),
+        ("HH", format!("{:02}", datetime.hour())),
+        ("mm", format!("{:02}", datetime.minute())),
+        ("ss", format!("{:02}", datetime.second())),
     ] {
         formatted = formatted.replace(from, &to);
     }
@@ -275,13 +264,18 @@ pub(crate) fn apply_format(format: &str, values: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{FormatSuggestion, apply_format, format_datetime, render_plain, render_value};
-    use xmlrpc::Value;
+    use dxr::{DateTime, Value};
+
+    /// A string value, which is what nearly everything bofhd sends is.
+    fn text(string: &str) -> Value {
+        Value::String(string.to_owned())
+    }
 
     /// Build the `{hdr, str_vars}` struct a bofhd server would send.
     fn suggestion(header: Option<&str>, str_vars: Value) -> FormatSuggestion {
         let mut strct = vec![(String::from("str_vars"), str_vars)];
         if let Some(header) = header {
-            strct.push((String::from("hdr"), Value::from(header)));
+            strct.push((String::from("hdr"), text(header)));
         }
         FormatSuggestion::parse(&Value::Struct(strct.into_iter().collect()))
             .expect("the suggestion should parse")
@@ -290,8 +284,8 @@ mod tests {
     /// Build one `(format, fields)` row of `str_vars`.
     fn row(format: &str, fields: &[&str]) -> Value {
         Value::Array(vec![
-            Value::from(format),
-            Value::Array(fields.iter().map(|&f| Value::from(f)).collect()),
+            text(format),
+            Value::Array(fields.iter().map(|&f| text(f)).collect()),
         ])
     }
 
@@ -341,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_bare_string_suggestion_is_printed_once() {
-        let suggestion = suggestion(None, Value::from("Done"));
+        let suggestion = suggestion(None, text("Done"));
         assert_eq!(suggestion.format(&entry(&[])), "Done");
         // Even when the response has several entries, unlike pybofh
         assert_eq!(
@@ -354,8 +348,8 @@ mod tests {
     fn headers_come_before_the_rows() {
         let suggestion = suggestion(Some("Name   Uid"), one_row("%-6s %s", &["name", "uid"]));
         let response = Value::Array(vec![
-            entry(&[("name", Value::from("foo")), ("uid", Value::Int(1))]),
-            entry(&[("name", Value::from("barbaz")), ("uid", Value::Int(22))]),
+            entry(&[("name", text("foo")), ("uid", Value::Integer(1))]),
+            entry(&[("name", text("barbaz")), ("uid", Value::Integer(22))]),
         ]);
         assert_eq!(
             suggestion.format(&response),
@@ -371,8 +365,8 @@ mod tests {
             Value::Array(vec![row("a=%s", &["a"]), row("b=%s", &["b"])]),
         );
         let response = Value::Array(vec![
-            entry(&[("a", Value::from("1")), ("b", Value::from("2"))]),
-            entry(&[("a", Value::from("3")), ("b", Value::from("4"))]),
+            entry(&[("a", text("1")), ("b", text("2"))]),
+            entry(&[("a", text("3")), ("b", text("4"))]),
         ]);
         assert_eq!(suggestion.format(&response), "a=1\na=3\nb=2\nb=4");
     }
@@ -381,9 +375,9 @@ mod tests {
     fn an_entry_missing_a_field_is_skipped() {
         let suggestion = suggestion(None, one_row("%s %s", &["a", "b"]));
         let response = Value::Array(vec![
-            entry(&[("a", Value::from("1")), ("b", Value::from("2"))]),
+            entry(&[("a", text("1")), ("b", text("2"))]),
             // Missing "b" entirely: skipped, rather than rendered with a blank
-            entry(&[("a", Value::from("3"))]),
+            entry(&[("a", text("3"))]),
         ]);
         assert_eq!(suggestion.format(&response), "1 2");
     }
@@ -402,8 +396,8 @@ mod tests {
     fn strings_in_a_response_are_passed_through() {
         let suggestion = suggestion(None, one_row("a=%s", &["a"]));
         let response = Value::Array(vec![
-            entry(&[("a", Value::from("1"))]),
-            Value::from("a plain message"),
+            entry(&[("a", text("1"))]),
+            text("a plain message"),
         ]);
         assert_eq!(suggestion.format(&response), "a=1\na plain message");
     }
@@ -412,13 +406,13 @@ mod tests {
     fn a_sub_header_containing_a_format_specifier_is_swapped_back() {
         // Bug-compatible with both reference implementations
         let swapped = Value::Array(vec![
-            Value::from("Affiliations"),
-            Value::Array(vec![Value::from("aff")]),
-            Value::from("  %s"),
+            text("Affiliations"),
+            Value::Array(vec![text("aff")]),
+            text("  %s"),
         ]);
         let suggestion = suggestion(None, Value::Array(vec![swapped]));
         assert_eq!(
-            suggestion.format(&entry(&[("aff", Value::from("STUDENT"))])),
+            suggestion.format(&entry(&[("aff", text("STUDENT"))])),
             "  STUDENT"
         );
     }
@@ -426,20 +420,20 @@ mod tests {
     #[test]
     fn sub_headers_are_printed_above_their_rows() {
         let with_header = Value::Array(vec![
-            Value::from("%s"),
-            Value::Array(vec![Value::from("aff")]),
-            Value::from("Affiliations:"),
+            text("%s"),
+            Value::Array(vec![text("aff")]),
+            text("Affiliations:"),
         ]);
         let suggestion = suggestion(None, Value::Array(vec![with_header]));
         assert_eq!(
-            suggestion.format(&entry(&[("aff", Value::from("STUDENT"))])),
+            suggestion.format(&entry(&[("aff", text("STUDENT"))])),
             "Affiliations:\nSTUDENT"
         );
     }
 
     #[test]
     fn dates_use_the_simple_date_format_subset() {
-        let datetime: iso8601::DateTime = "2024-01-05T09:07:03+00:00".parse().unwrap();
+        let datetime: DateTime = "20240105T09:07:03".parse().unwrap();
         assert_eq!(format_datetime(datetime, "yyyy-MM-dd"), "2024-01-05");
         assert_eq!(
             format_datetime(datetime, "yyyy-MM-dd HH:mm:ss"),
@@ -451,7 +445,7 @@ mod tests {
 
     #[test]
     fn a_typed_date_field_is_formatted_with_its_pattern() {
-        let datetime: iso8601::DateTime = "2024-01-05T09:07:03+00:00".parse().unwrap();
+        let datetime: DateTime = "20240105T09:07:03".parse().unwrap();
         let suggestion = suggestion(None, one_row("%s", &["when:date:yyyy-MM-dd"]));
         assert_eq!(
             suggestion.format(&entry(&[("when", Value::DateTime(datetime))])),
@@ -465,7 +459,7 @@ mod tests {
         // The server's reference spec would key on "id" instead and drop the row; see FieldRef.
         let suggestion = suggestion(None, one_row("%s", &["id:target"]));
         assert_eq!(
-            suggestion.format(&entry(&[("id:target", Value::from("account:foo"))])),
+            suggestion.format(&entry(&[("id:target", text("account:foo"))])),
             "account:foo"
         );
     }
@@ -476,15 +470,15 @@ mod tests {
         // like this can only come from a future server. We drop the entry, as the server's own
         // reference spec does; pybofh raises instead and loses the whole response.
         let suggestion = suggestion(None, one_row("%s", &["cost:money:NOK"]));
-        assert_eq!(suggestion.format(&entry(&[("cost", Value::from(10))])), "");
+        assert_eq!(suggestion.format(&entry(&[("cost", Value::Integer(10))])), "");
     }
 
     #[test]
     fn values_are_rendered_the_way_rust_would() {
         // pybofh would print "True" and "1.0" here, since it leaves the conversion to Python
-        assert_eq!(render_value(&Value::Bool(true)), "true");
+        assert_eq!(render_value(&Value::Boolean(true)), "true");
         assert_eq!(render_value(&Value::Double(1.0)), "1");
-        assert_eq!(render_value(&Value::Int(42)), "42");
+        assert_eq!(render_value(&Value::Integer(42)), "42");
     }
 
     #[test]
@@ -499,9 +493,9 @@ mod tests {
 
     #[test]
     fn commands_without_a_suggestion_fall_back_to_the_raw_response() {
-        assert!(FormatSuggestion::parse(&Value::from("")).is_none());
+        assert!(FormatSuggestion::parse(&text("")).is_none());
         assert_eq!(
-            render_plain(&Value::from("already formatted")),
+            render_plain(&text("already formatted")),
             "already formatted"
         );
     }

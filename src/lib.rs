@@ -2,10 +2,11 @@ pub mod formatting;
 
 pub use crate::formatting::FormatSuggestion;
 
+use dxr::{Fault, MethodCall, Value};
+use dxr_client::utils::{request_to_body, response_to_result};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use thiserror::Error;
-use xmlrpc::{Request, Value};
 
 /// The name this client identifies itself as to a bofhd server.
 pub const CLIENT_ID: &str = "bofh-rs";
@@ -13,12 +14,22 @@ pub const CLIENT_ID: &str = "bofh-rs";
 /// The version this client identifies itself as to a bofhd server.
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How much of a response to read before giving up on it.
+///
+/// Only a sanity limit: the largest thing bofhd answers with is a listing, and the client holds
+/// the whole response in memory anyway. The HTTP client's own default is lower than some
+/// listings can plausibly get.
+const MAX_RESPONSE_SIZE: u64 = 64 * 1024 * 1024;
+
 /// Errors that might occur when communicating with a bofhd server.
 #[derive(Error, Debug)]
 pub enum BofhError {
+    /// The request could not be sent, or the response could not be read back.
+    #[error("{0}")]
+    TransportError(#[from] ureq::Error),
     /// Error occurring in the XML-RPC protocol.
     #[error("{0}")]
-    XmlRpcError(#[from] xmlrpc::Error),
+    XmlRpcError(#[from] dxr::Error),
     /// Attempted to run authenticated command before session was established.
     #[error("Attempted to run authenticated command before session was established")]
     NoSessionError,
@@ -176,6 +187,38 @@ fn wash_value(value: Value) -> Value {
     }
 }
 
+/// Read a struct, or nothing if the value is some other kind.
+///
+/// [`Value`] is a plain enum with no accessors of its own, so the three shapes bofhd's responses
+/// are made of get one each here rather than a `match` at every use.
+pub(crate) fn as_struct(value: &Value) -> Option<&BTreeMap<String, Value>> {
+    match value {
+        Value::Struct(strct) => Some(strct),
+        _ => None,
+    }
+}
+
+/// Read an array, or nothing if the value is some other kind.
+pub(crate) fn as_array(value: &Value) -> Option<&[Value]> {
+    match value {
+        Value::Array(array) => Some(array),
+        _ => None,
+    }
+}
+
+/// Read a string, or nothing if the value is some other kind.
+pub(crate) fn as_str(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(string) => Some(string),
+        _ => None,
+    }
+}
+
+/// Read one field of a response entry, or nothing if the entry hasn't got it.
+pub(crate) fn field<'a>(entry: &'a Value, name: &str) -> Option<&'a Value> {
+    as_struct(entry)?.get(name)
+}
+
 /// Read a flag the way bofhd sends them, which is not always as a boolean.
 ///
 /// `cmd_param` hands some flags to the XML-RPC layer as the *text* Python's `str()` makes of a
@@ -183,9 +226,9 @@ fn wash_value(value: Value) -> Value {
 /// which is how bofhd omits the flags it hasn't set.
 fn as_bool(value: Option<&Value>) -> bool {
     match value {
-        Some(Value::Bool(value)) => *value,
+        Some(Value::Boolean(value)) => *value,
         Some(Value::String(value)) => value == "True",
-        Some(Value::Int(value)) => *value != 0,
+        Some(Value::Integer(value)) => *value != 0,
         _ => false,
     }
 }
@@ -209,14 +252,63 @@ fn escape_argument(argument: &str) -> Cow<'_, str> {
     }
 }
 
+/// Encode one argument of a bofhd call.
+///
+/// Every argument goes on the wire as a string: bofhd's own clients send nothing else, and
+/// `xmlutils.xmlrpc_to_native` turns the text back into whatever the command wants.
+fn escaped_argument(argument: &str) -> Value {
+    Value::String(escape_argument(argument).into_owned())
+}
+
+/// Read what the server sent back, whether that turned out to be an answer or a fault.
+///
+/// Kept apart from the sending so that the whole of the decoding can be tested without a server:
+/// a fault arrives as an ordinary successful response, and telling the two apart is the server's
+/// shape rather than HTTP's.
+fn read_response(body: &str) -> Result<Value, BofhError> {
+    match response_to_result(body)? {
+        Ok(response) => Ok(wash_value(response.value)),
+        Err(fault) => Err(bofhd_fault(&fault.fault)),
+    }
+}
+
+/// Work out which [`BofhError`] a fault from bofhd stands for.
+///
+/// `protocol._format_xmlrpc_fault` spells faults as `"<ErrType>:<message>"`. Only three error
+/// types keep their own name; everything else a command can raise, permission denials included,
+/// is flattened to `CerebrumError` before it leaves the server, so the fault string is as much
+/// as the client can know. The numeric code says only whether the server blames Cerebrum or
+/// itself, which it has already said in the type, so it is not read.
+fn bofhd_fault(fault: &Fault) -> BofhError {
+    let Some(bofhd_error) = fault
+        .string()
+        .strip_prefix("Cerebrum.modules.bofhd.errors.")
+    else {
+        return match fault.string().strip_prefix("NotImplementedError:") {
+            Some(not_implemented) => BofhError::NotImplementedError(not_implemented.to_owned()),
+            None => BofhError::Fault(fault.string().to_owned()),
+        };
+    };
+
+    if let Some(cerebrum_error) = bofhd_error.strip_prefix("CerebrumError:") {
+        BofhError::CerebrumError(cerebrum_error.to_owned())
+    } else if bofhd_error.starts_with("ServerRestartedError:") {
+        BofhError::ServerRestartedError
+    } else if bofhd_error.starts_with("SessionExpiredError:") {
+        BofhError::SessionExpiredError
+    } else {
+        BofhError::Fault(bofhd_error.to_owned())
+    }
+}
+
 /// Read the struct that `call_prompt_func` answers with.
 ///
 /// The map is flattened here rather than in the client: applying a row's printf format is the
 /// same job the library already does for format suggestions, and it is what keeps
-/// [`xmlrpc::Value`] out of the public API.
+/// [`Value`] out of the client.
 fn parse_prompt(response: &Value) -> Prompt {
     let empty = BTreeMap::new();
-    let strct = response.as_struct().unwrap_or(&empty);
+    let strct = as_struct(response).unwrap_or(&empty);
 
     Prompt {
         prompt: as_optional_string(strct.get("prompt")),
@@ -241,7 +333,7 @@ fn parse_prompt_map(rows: &[Value], raw: bool) -> Option<PromptMap> {
         options: rows
             .iter()
             .map(|row| PromptOption {
-                value: as_optional_string(row.as_array().and_then(|row| row.get(1)))
+                value: as_optional_string(as_array(row).and_then(|row| row.get(1)))
                     .unwrap_or_default(),
                 label: render_map_row(row).unwrap_or_default(),
             })
@@ -252,8 +344,8 @@ fn parse_prompt_map(rows: &[Value], raw: bool) -> Option<PromptMap> {
 
 /// Render one row of a map, which pairs a printf format with the values to interpolate into it.
 fn render_map_row(row: &Value) -> Option<String> {
-    let (format, values) = row.as_array()?.first()?.as_array()?.split_first()?;
-    let format = format.as_str()?;
+    let (format, values) = as_array(as_array(row)?.first()?)?.split_first()?;
+    let format = as_str(format)?;
 
     if !format.contains('%') {
         return Some(format.to_owned());
@@ -281,6 +373,11 @@ pub struct Bofh {
     session: Option<String>,
     /// Output format suggestion cache.
     format_suggestions: BTreeMap<String, Option<FormatSuggestion>>,
+    /// The HTTP client every call goes through, which also holds the connection pool.
+    ///
+    /// This is where `--timeout`, `--cert` and `--insecure` will be configured once they do
+    /// anything; see `TODO-PARITY.md`.
+    agent: ureq::Agent,
 }
 
 impl Bofh {
@@ -295,62 +392,55 @@ impl Bofh {
             session: None,
             motd: None,
             format_suggestions: BTreeMap::new(),
+            // A fault is sent with an ordinary 200, but a server that answers an error status
+            // with a fault body should still be read as a fault rather than as a status
+            agent: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .user_agent(format!("{CLIENT_ID}/{CLIENT_VERSION}"))
+                    .build(),
+            ),
         };
         // bofhd returns an empty string when the site has no MOTD file and nothing to nag about
         bofh.motd = Some(bofh.get_motd(CLIENT_ID, CLIENT_VERSION)?).filter(|motd| !motd.is_empty());
         Ok(bofh)
     }
 
-    fn run_request(&self, request: &Request) -> Result<Value, BofhError> {
-        match request.call_url(&self.url) {
-            Ok(result) => Ok(wash_value(result)),
-            Err(err) => {
-                if let Some(fault) = err.fault() {
-                    if let Some(bofhd_error) = fault
-                        .fault_string
-                        .strip_prefix("Cerebrum.modules.bofhd.errors.")
-                    {
-                        if let Some(cerebrum_error) = bofhd_error.strip_prefix("CerebrumError:") {
-                            Err(BofhError::CerebrumError(cerebrum_error.to_owned()))
-                        } else if bofhd_error.strip_prefix("ServerRestartedError:").is_some() {
-                            Err(BofhError::ServerRestartedError)
-                        } else if bofhd_error.strip_prefix("SessionExpiredError:").is_some() {
-                            Err(BofhError::SessionExpiredError)
-                        } else {
-                            Err(BofhError::Fault(bofhd_error.to_owned()))
-                        }
-                    } else if let Some(not_implemented_error) =
-                        fault.fault_string.strip_prefix("NotImplementedError:")
-                    {
-                        Err(BofhError::NotImplementedError(
-                            not_implemented_error.to_owned(),
-                        ))
-                    } else {
-                        Err(BofhError::Fault(fault.fault_string.clone()))
-                    }
-                } else {
-                    Err(BofhError::XmlRpcError(err))
-                }
-            }
-        }
+    fn run_request(&self, call: &MethodCall) -> Result<Value, BofhError> {
+        let response = self
+            .agent
+            .post(&self.url)
+            .content_type("text/xml")
+            .send(request_to_body(call)?)?;
+
+        // A fault is a perfectly ordinary 200 from bofhd, and the status is of no further
+        // interest once there is a body to read: whatever the server says went wrong, it says
+        // in the fault, not in the status line
+        let mut body = response.into_body();
+        let body = body
+            .with_config()
+            .limit(MAX_RESPONSE_SIZE)
+            .read_to_string()?;
+
+        read_response(&body)
     }
 
     fn run_raw_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
-        let mut request = Request::new(command);
-        for arg in args {
-            request = request.arg(escape_argument(arg).as_ref());
-        }
-        self.run_request(&request)
+        self.run_request(&MethodCall {
+            name: Cow::Borrowed(command),
+            params: args.iter().map(|arg| escaped_argument(arg)).collect(),
+        })
     }
 
     fn run_raw_sess_command(&self, command: &str, args: &[&str]) -> Result<Value, BofhError> {
         if let Some(session) = &self.session {
             // The session identifier comes from the server, so it's sent back unescaped
-            let mut request = Request::new(command).arg(session.clone());
-            for arg in args {
-                request = request.arg(escape_argument(arg).as_ref());
-            }
-            self.run_request(&request)
+            let mut params = vec![Value::String(session.clone())];
+            params.extend(args.iter().map(|arg| escaped_argument(arg)));
+            self.run_request(&MethodCall {
+                name: Cow::Borrowed(command),
+                params,
+            })
         } else {
             Err(BofhError::NoSessionError)
         }
@@ -394,8 +484,10 @@ impl Bofh {
         self.format_suggestions.clear();
 
         let mut commands = BTreeMap::<String, CommandGroup>::new();
-        for (cmd, array) in response.as_struct().unwrap() {
-            let cmd_group = array[0].as_array().unwrap()[0].as_str().unwrap();
+        for (cmd, array) in as_struct(&response).unwrap() {
+            let array = as_array(array).unwrap();
+            let name = as_array(&array[0]).unwrap();
+            let cmd_group = as_str(&name[0]).unwrap();
             if !commands.contains_key(cmd_group) {
                 commands.insert(
                     cmd_group.into(),
@@ -405,20 +497,21 @@ impl Bofh {
                     },
                 );
             }
+            let cmd_name = as_str(&name[1]).unwrap();
             commands.get_mut(cmd_group).unwrap().commands.insert(
-                array[0].as_array().unwrap()[1].as_str().unwrap().into(),
+                cmd_name.into(),
                 Command {
-                    name: array[0].as_array().unwrap()[1].as_str().unwrap().into(),
+                    name: cmd_name.into(),
                     fullname: cmd.into(),
                     // A command with no parameters and no prompt func is sent as a one-element
-                    // array, so the arguments have to be asked for rather than indexed:
-                    // `misc reload` is one, and it is superuser-only, which is why this went
-                    // unnoticed (`cmd_param.py:287-289`)
+                    // array, so the arguments have to be asked for rather than indexed
+                    // (`cmd_param.py:303-309`). Twenty commands in the Cerebrum tree are like
+                    // that, `misc affiliations` among them
                     args: match array.get(1) {
                         Some(Value::Array(array)) => {
                             let mut vector = vec![];
                             for strct in array {
-                                let strct = strct.as_struct().unwrap();
+                                let strct = as_struct(strct).unwrap();
                                 vector.push(Argument {
                                     optional: as_bool(strct.get("optional")),
                                     repeat: as_bool(strct.get("repeat")),
@@ -576,8 +669,7 @@ impl Bofh {
             let _ = self.run_raw_sess_command("logout", &[]);
         }
         self.session = Some(
-            self.run_raw_command("login", &[username, &password])?
-                .as_str()
+            as_str(&self.run_raw_command("login", &[username, &password])?)
                 .expect("Invalid bofhd session identifier")
                 .to_owned(),
         );
@@ -632,9 +724,7 @@ impl Bofh {
     /// Will normally never panic, unless the help text returned by the bofhd server is in an
     /// invalid format.
     fn help_request(&self, topic: &[&str]) -> Result<String, BofhError> {
-        Ok(self
-            .run_raw_sess_command("help", topic)?
-            .as_str()
+        Ok(as_str(&self.run_raw_sess_command("help", topic)?)
             .expect("Invalid bofhd response")
             .to_owned())
     }
@@ -653,9 +743,7 @@ impl Bofh {
     ///
     /// Will normally never panic, unless the Message of the Day returned by the bofhd server is in an invalid format.
     pub fn get_motd(&self, client_id: &str, client_version: &str) -> Result<String, BofhError> {
-        Ok(self
-            .run_raw_command("get_motd", &[client_id, client_version])?
-            .as_str()
+        Ok(as_str(&self.run_raw_command("get_motd", &[client_id, client_version])?)
             .expect("Invalid bofhd response")
             .to_owned())
     }
@@ -672,8 +760,16 @@ impl Drop for Bofh {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Bofh, escape_argument, parse_prompt, wash_value};
-    use xmlrpc::Value;
+    use crate::{
+        Bofh, BofhError, bofhd_fault, escaped_argument, parse_prompt, read_response, wash_value,
+    };
+    use dxr::{Fault, MethodCall, Value};
+    use std::borrow::Cow;
+
+    /// A string value, which is what nearly everything bofhd sends is.
+    fn text(string: &str) -> Value {
+        Value::String(string.to_owned())
+    }
 
     #[test]
     fn connect() {
@@ -682,31 +778,31 @@ mod tests {
 
     #[test]
     fn washing_decodes_none_and_unescapes_colons() {
-        assert_eq!(wash_value(Value::from(":None")), Value::Nil);
-        assert_eq!(wash_value(Value::from("::None")), Value::from(":None"));
-        assert_eq!(wash_value(Value::from(":::foo")), Value::from("::foo"));
-        assert_eq!(wash_value(Value::from("None")), Value::from("None"));
-        assert_eq!(wash_value(Value::from("")), Value::from(""));
-        assert_eq!(wash_value(Value::Int(1)), Value::Int(1));
+        assert_eq!(wash_value(text(":None")), Value::Nil);
+        assert_eq!(wash_value(text("::None")), text(":None"));
+        assert_eq!(wash_value(text(":::foo")), text("::foo"));
+        assert_eq!(wash_value(text("None")), text("None"));
+        assert_eq!(wash_value(text("")), text(""));
+        assert_eq!(wash_value(Value::Integer(1)), Value::Integer(1));
     }
 
     #[test]
     fn washing_recurses_into_arrays_and_structs() {
         assert_eq!(
             wash_value(Value::Array(vec![
-                Value::from("None"),
-                Value::from(":None"),
-                Value::from("::None"),
+                text("None"),
+                text(":None"),
+                text("::None"),
             ])),
-            Value::Array(vec![Value::from("None"), Value::Nil, Value::from(":None"),])
+            Value::Array(vec![text("None"), Value::Nil, text(":None"),])
         );
         assert_eq!(
             wash_value(Value::Struct(
                 [
-                    ("expire_date".to_owned(), Value::from(":None")),
+                    ("expire_date".to_owned(), text(":None")),
                     (
                         "affiliations".to_owned(),
-                        Value::Array(vec![Value::from(":None")])
+                        Value::Array(vec![text(":None")])
                     ),
                 ]
                 .into()
@@ -726,29 +822,29 @@ mod tests {
         let row = |format: &str, name: &str, value: Value| {
             Value::Array(vec![
                 Value::Array(vec![
-                    Value::from(format),
-                    Value::from(name),
-                    Value::from("password"),
+                    text(format),
+                    text(name),
+                    text("password"),
                 ]),
                 value,
             ])
         };
         let mut strct = vec![
-            ("prompt".to_owned(), Value::from("Choose user(s)")),
+            ("prompt".to_owned(), text("Choose user(s)")),
             (
                 "map".to_owned(),
                 // The header carries no value of its own, and the rows below it are numbered
                 // from 1 by the client, not by the server
                 Value::Array(vec![
                     row("%8s %s", "uname", Value::Nil),
-                    row("%-6s %s", "alice", Value::from(1)),
-                    row("%-6s %s", "bob", Value::from(2)),
+                    row("%-6s %s", "alice", Value::Integer(1)),
+                    row("%-6s %s", "bob", Value::Integer(2)),
                 ]),
             ),
-            ("last_arg".to_owned(), Value::from(true)),
+            ("last_arg".to_owned(), Value::Boolean(true)),
         ];
         if raw {
-            strct.push(("raw".to_owned(), Value::from(true)));
+            strct.push(("raw".to_owned(), Value::Boolean(true)));
         }
         Value::Struct(strct.into_iter().collect())
     }
@@ -782,8 +878,8 @@ mod tests {
     fn a_prompt_without_a_map_has_none() {
         let prompt = parse_prompt(&Value::Struct(
             [
-                ("prompt".to_owned(), Value::from("Enter printer name")),
-                ("default".to_owned(), Value::from("hp-7")),
+                ("prompt".to_owned(), text("Enter printer name")),
+                ("default".to_owned(), text("hp-7")),
             ]
             .into_iter()
             .collect(),
@@ -794,14 +890,127 @@ mod tests {
         assert!(!prompt.last_arg);
     }
 
-    /// Escaping an argument and washing it again should get us back what the user typed.
+    /// A `methodResponse` exactly as Python's `xmlrpc.client.dumps` writes it, which is what
+    /// bofhd answers with.
+    const RESPONSE: &str = r"<?xml version='1.0'?>
+<methodResponse>
+<params>
+<param>
+<value><struct>
+<member>
+<name>entity_name</name>
+<value><string>foo</string></value>
+</member>
+<member>
+<name>uid</name>
+<value><int>1234</int></value>
+</member>
+<member>
+<name>expire_date</name>
+<value><string>:None</string></value>
+</member>
+<member>
+<name>np_type</name>
+<value><string>::literal</string></value>
+</member>
+</struct></value>
+</param>
+</params>
+</methodResponse>
+";
+
+    /// The same, for a fault.
+    const FAULT: &str = r"<?xml version='1.0'?>
+<methodResponse>
+<fault>
+<value><struct>
+<member>
+<name>faultCode</name>
+<value><int>1</int></value>
+</member>
+<member>
+<name>faultString</name>
+<value><string>Cerebrum.modules.bofhd.errors.CerebrumError:Unknown account</string></value>
+</member>
+</struct></value>
+</fault>
+</methodResponse>
+";
+
+    /// Reading a response off the wire is the one thing no other test covers, since there is no
+    /// bofhd to talk to: the body here is what Python's marshaller really produces.
+    #[test]
+    fn a_response_is_read_and_washed_in_one_go() {
+        let response = read_response(RESPONSE).expect("the response should parse");
+        let strct = crate::as_struct(&response).expect("a struct response");
+
+        assert_eq!(strct.get("entity_name"), Some(&text("foo")));
+        assert_eq!(strct.get("uid"), Some(&Value::Integer(1234)));
+        // Washed on the way in, so the client never sees bofhd's encoding
+        assert_eq!(strct.get("expire_date"), Some(&Value::Nil));
+        assert_eq!(strct.get("np_type"), Some(&text(":literal")));
+    }
+
+    /// A fault is an ordinary 200 with a different body, so it has to be told apart by shape.
+    #[test]
+    fn a_fault_body_is_read_as_the_error_it_stands_for() {
+        match read_response(FAULT) {
+            Err(BofhError::CerebrumError(message)) => assert_eq!(message, "Unknown account"),
+            other => panic!("expected a Cerebrum error, got {other:?}"),
+        }
+    }
+
+    /// Only three error types keep their own name; everything else is flattened server-side.
+    #[test]
+    fn each_kind_of_fault_string_maps_to_its_own_error() {
+        let fault = |string: &str| bofhd_fault(&Fault::new(1, string.to_owned()));
+
+        assert!(matches!(
+            fault("Cerebrum.modules.bofhd.errors.ServerRestartedError:"),
+            BofhError::ServerRestartedError
+        ));
+        assert!(matches!(
+            fault("Cerebrum.modules.bofhd.errors.SessionExpiredError:go away"),
+            BofhError::SessionExpiredError
+        ));
+        assert!(matches!(
+            fault("Cerebrum.modules.bofhd.errors.UnknownError:what"),
+            BofhError::Fault(_)
+        ));
+        assert!(matches!(
+            fault("NotImplementedError:no such method"),
+            BofhError::NotImplementedError(_)
+        ));
+        // A fault from something that isn't bofhd at all
+        assert!(matches!(fault("boom"), BofhError::Fault(_)));
+    }
+
+    /// The arguments of a call go out as strings, with the session identifier unescaped in front.
+    #[test]
+    fn a_call_serialises_to_the_shape_bofhd_reads() {
+        let call = MethodCall {
+            name: Cow::Borrowed("run_command"),
+            params: vec![
+                text("session-id"),
+                escaped_argument("user_info"),
+                escaped_argument(":foo"),
+            ],
+        };
+        let body = call.to_xml().expect("the call should serialise");
+        let parsed = MethodCall::from_xml(&body).expect("and parse back");
+
+        assert_eq!(parsed.name, "run_command");
+        assert_eq!(
+            parsed.params,
+            [text("session-id"), text("user_info"), text("::foo")]
+        );
+    }
+
+    /// Encoding an argument and washing it again should get us back what the user typed.
     #[test]
     fn escaping_an_argument_round_trips() {
         for argument in ["foo", ":foo", "::foo", ":None", "", ":"] {
-            assert_eq!(
-                wash_value(Value::from(escape_argument(argument).as_ref())),
-                Value::from(argument)
-            );
+            assert_eq!(wash_value(escaped_argument(argument)), text(argument));
         }
     }
 }
