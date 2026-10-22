@@ -367,11 +367,17 @@ impl Resolved<'_> {
         script: &mut Option<Script>,
         ask: Option<&mut (dyn Ask + '_)>,
     ) -> Result<Completed, Box<dyn Error>> {
-        match self.target {
-            Target::Internal(command) => {
-                Ok(internal::run(command, &self.args, bofh, helper, script).into())
+        let Self { target, args } = self;
+        match target {
+            Target::Internal(command) => with_session(bofh, user, |bofh| {
+                internal::run(command, &args, bofh, helper, script)
+            }),
+            Target::Server(command) => {
+                let mut ask = ask;
+                with_session(bofh, user, |bofh| {
+                    attempt(bofh, &command, &args, ask.as_deref_mut())
+                })
             }
-            Target::Server(command) => run_command(bofh, user, &command, &self.args, ask),
         }
     }
 
@@ -449,20 +455,22 @@ fn resolve_command<'a>(helper: &BofhHelper, words: &'a [String]) -> Result<Resol
     })
 }
 
-/// Run a bofh command on the server, transparently recovering from a restarted server or an
-/// expired session.
+/// Run a command, transparently recovering from a restarted server or an expired session.
+///
+/// `run` is whatever the command does, and is called again once the session works: it returns
+/// `Err` only for the two errors that re-establishing the session can fix, and everything else
+/// as an [`Outcome`]. Both kinds of command come through here — the client's own `help` asks the
+/// server for its text, and an expired session there needs the same remedy as anywhere else.
 ///
 /// # Errors
 ///
 /// Returns an error if reauthentication fails, in which case the client can't carry on.
-fn run_command(
+fn with_session(
     bofh: &mut Bofh,
     user: &str,
-    command: &Command,
-    given: &[&str],
-    mut ask: Option<&mut (dyn Ask + '_)>,
+    mut run: impl FnMut(&mut Bofh) -> Result<Outcome, BofhError>,
 ) -> Result<Completed, Box<dyn Error>> {
-    let error = match attempt(bofh, command, given, ask.as_deref_mut()) {
+    let error = match run(bofh) {
         Ok(outcome) => return Ok(outcome.into()),
         Err(error) => error,
     };
@@ -483,7 +491,7 @@ fn run_command(
     // is asked again: the server drives the questions, so there is no way to resume a half-asked
     // command against a session that no longer exists.
     Ok(Completed {
-        outcome: match attempt(bofh, command, given, ask) {
+        outcome: match run(bofh) {
             Ok(outcome) => outcome,
             Err(error) => Outcome::Failed(error.to_string()),
         },

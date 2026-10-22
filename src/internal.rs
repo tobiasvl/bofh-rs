@@ -6,7 +6,7 @@
 
 use crate::Outcome;
 use crate::helper::BofhHelper;
-use bofh::Bofh;
+use bofh::{Bofh, BofhError};
 use std::env;
 use std::fmt::Write;
 use std::fs::{File, OpenOptions, read_to_string};
@@ -35,6 +35,16 @@ pub(crate) struct InternalCommand {
     /// Description of the command, used by `help`.
     description: &'static str,
     kind: Kind,
+}
+
+impl InternalCommand {
+    /// Whether the words after this command name another command, as `help user info` does.
+    ///
+    /// The line editor needs to know, so that it completes and colours those words as the
+    /// command they name rather than as subcommands of this one, which has none.
+    pub(crate) fn names_a_command(&self) -> bool {
+        self.kind == Kind::Help
+    }
 }
 
 /// Every internal command, in the order they are listed in, which is the order they are shown in.
@@ -85,21 +95,32 @@ pub(crate) fn lookup(name: &str) -> Option<&'static InternalCommand> {
 }
 
 /// Run an internal command, with the words following it as its arguments.
+///
+/// # Errors
+///
+/// As for a server command, the `Err` is only for the two errors the caller can do something
+/// about by re-establishing the session — and only `help` asks the server anything, so only
+/// `help` can return one. Anything else is a message for the user, and so an
+/// [`Outcome::Failed`].
 pub(crate) fn run(
     command: &InternalCommand,
     args: &[&str],
     bofh: &Bofh,
     helper: &BofhHelper,
     script_file: &mut Option<Script>,
-) -> Outcome {
-    match command.kind {
+) -> Result<Outcome, BofhError> {
+    Ok(match command.kind {
         Kind::Commands if args.is_empty() => Outcome::Output(commands(helper)),
         Kind::Quit if args.is_empty() => Outcome::Quit,
-        Kind::Help => help(args, bofh, helper).map_or_else(Outcome::Failed, Outcome::Output),
+        Kind::Help => match help(args, bofh, helper) {
+            Ok(help) => Outcome::Output(help),
+            Err(HelpError::Message(message)) => Outcome::Failed(message),
+            Err(HelpError::Session(error)) => return Err(error),
+        },
         Kind::Script => script(args, script_file).map_or_else(Outcome::Failed, Outcome::Output),
         Kind::Source => source(args).map_or_else(Outcome::Failed, Outcome::Sourced),
         _ => Outcome::Failed(format!("Usage: {}", command.usage)),
-    }
+    })
 }
 
 /// List every command the user can run, as they would type it.
@@ -139,19 +160,49 @@ fn commands(helper: &BofhHelper) -> String {
     lines.join("\n")
 }
 
+/// Why `help` had nothing to show.
+#[derive(Debug)]
+enum HelpError {
+    /// Something to tell the user: a name that doesn't resolve, or the server refusing.
+    Message(String),
+    /// The session needs re-establishing, after which the same `help` can simply be asked again.
+    ///
+    /// Kept as the error it is rather than turned into its message. Turning it into text was the
+    /// bug: an expired session came back from `help` as the words "Session expired", which left
+    /// the REPL nothing to recover from, so it printed them and carried on with a dead session.
+    Session(BofhError),
+}
+
+impl From<String> for HelpError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<BofhError> for HelpError {
+    fn from(error: BofhError) -> Self {
+        match error {
+            error @ (BofhError::ServerRestartedError | BofhError::SessionExpiredError) => {
+                Self::Session(error)
+            }
+            error => Self::Message(error.to_string()),
+        }
+    }
+}
+
 /// Explain a command group, a command, an argument type, or the whole command set.
-fn help(args: &[&str], bofh: &Bofh, helper: &BofhHelper) -> Result<String, String> {
+fn help(args: &[&str], bofh: &Bofh, helper: &BofhHelper) -> Result<String, HelpError> {
     match args {
-        [] => general_help(bofh),
+        [] => Ok(general_help(bofh)?),
         // `arg_help` is not a command group but bofhd's way of naming argument types, so it isn't
         // resolved against anything; the reference comes from an argument's `help_ref`
-        ["arg_help", help_ref] => bofh.help_argument(help_ref).map_err(|err| err.to_string()),
-        ["arg_help", ..] => Err(String::from("Usage: help arg_help <reference>")),
+        ["arg_help", help_ref] => Ok(bofh.help_argument(help_ref)?),
+        ["arg_help", ..] => Err(String::from("Usage: help arg_help <reference>").into()),
         [topic] => {
             let topic = helper.resolve_command_name(topic)?;
             match lookup(topic) {
                 Some(command) => Ok(format!("{} -- {}", command.usage, command.description)),
-                None => bofh.help_group(topic).map_err(|err| err.to_string()),
+                None => Ok(bofh.help_group(topic)?),
             }
         }
         [group, command] => {
@@ -160,15 +211,16 @@ fn help(args: &[&str], bofh: &Bofh, helper: &BofhHelper) -> Result<String, Strin
                 return Err(format!(
                     "'{}' is handled by the client and has no subcommands",
                     internal.name
-                ));
+                )
+                .into());
             }
             let command = helper.resolve_subcommand_name(group, command)?;
-            bofh.help_command(group, command)
-                .map_err(|err| err.to_string())
+            Ok(bofh.help_command(group, command)?)
         }
         _ => Err(String::from(
             "Usage: help | help <group> | help <group> <command> | help arg_help <reference>",
-        )),
+        )
+        .into()),
     }
 }
 
@@ -176,8 +228,8 @@ fn help(args: &[&str], bofh: &Bofh, helper: &BofhHelper) -> Result<String, Strin
 ///
 /// The server lists one command group per line and cannot know about the internal commands, so
 /// they are added here.
-fn general_help(bofh: &Bofh) -> Result<String, String> {
-    let mut help = bofh.help().map_err(|err| err.to_string())?;
+fn general_help(bofh: &Bofh) -> Result<String, BofhError> {
+    let mut help = bofh.help()?;
 
     help.push_str("\n\nCommands handled by the client itself:\n");
     for command in INTERNAL_COMMANDS {
@@ -295,9 +347,11 @@ fn expand_tilde(path: &str) -> PathBuf {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        INTERNAL_COMMANDS, Script, Source, commands, expand_tilde, lookup, script, source,
+        HelpError, INTERNAL_COMMANDS, Script, Source, commands, expand_tilde, lookup, script,
+        source,
     };
     use crate::helper::BofhHelper;
+    use bofh::BofhError;
     use bofh::{Argument, Command, CommandGroup};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -536,5 +590,24 @@ pub(crate) mod tests {
         // Looking up another user's home needs a password database we have no business reading
         assert_eq!(expand_tilde("~root/foo"), PathBuf::from("~root/foo"));
         assert_eq!(expand_tilde("/tmp/foo"), PathBuf::from("/tmp/foo"));
+    }
+
+    /// `help person find` on an expired session used to print "Session expired" and carry on,
+    /// because the error was turned into its message before anyone could act on it. The two
+    /// errors a new session can fix have to survive as errors; the rest are only ever read.
+    #[test]
+    fn help_keeps_the_errors_a_new_session_can_fix() {
+        assert!(matches!(
+            HelpError::from(BofhError::SessionExpiredError),
+            HelpError::Session(BofhError::SessionExpiredError)
+        ));
+        assert!(matches!(
+            HelpError::from(BofhError::ServerRestartedError),
+            HelpError::Session(BofhError::ServerRestartedError)
+        ));
+        match HelpError::from(BofhError::CerebrumError(String::from("No such command"))) {
+            HelpError::Message(message) => assert_eq!(message, "No such command"),
+            other @ HelpError::Session(_) => panic!("expected a message, got {other:?}"),
+        }
     }
 }
